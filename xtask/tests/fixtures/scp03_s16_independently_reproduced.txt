@@ -1,0 +1,49 @@
+# SCP03 S16 reference vector set.
+#
+# Provenance:
+# - Reference vectors independently reproduced from OpenSCDP and
+#   GlobalPlatformPro behavior, cross-checked against the public SCP03
+#   specification.
+# - These are not official GlobalPlatform certification vectors.
+#
+# Profile:
+# - SCP03 S16
+# - AES-128 static ENC/MAC keys
+# - 16-byte host/card challenges
+# - 16-byte authentication cryptograms
+# - 16-byte non-truncated C-MAC/R-MAC
+
+profile = S16
+static_enc_key = 404142434445464748494A4B4C4D4E4F
+static_mac_key = 505152535455565758595A5B5C5D5E5F
+host_challenge = 01020304050607081112131415161718
+card_challenge = 525553544C455430525553544C455431
+context = 01020304050607081112131415161718525553544C455430525553544C455431
+
+card_cryptogram = 87FA625FF83C445838D176DD1F0BF2C8
+host_cryptogram = E6B85623C691383873C7CC6252224886
+session_enc_key = EA0895AF950C35EC39B7A6F808B99C60
+session_mac_key = 22A9A7DA89A1B15E3C029D8F29D5BE3C
+session_rmac_key = B1E94BE7B8015ADBA4E5192E5FBEBA6C
+
+external_authenticate_header = 8482030020
+external_authenticate_cmac = 67017438D62BCEAA4C4521C3FA156F7B
+
+protected_get_data_header = 84CA9F7010
+protected_get_data_cmac = 5B3E8B98643714489BE9DC80BBC62DB9
+protected_get_data_response = 9F700107
+protected_get_data_rmac = 09A8F7B24577E6C94FB27C12D7821247
+
+response_enc_iv_1 = 37C7686F16E2B15820A6DD18D28E99CA
+encrypted_lifecycle_response = B13EEDD4D9AFFA863A85627347BE4A25
+encrypted_lifecycle_rmac = 49302C12AE8F53738F99018913423A8E
+
+store_plaintext = 527573746C65744F5320534350303320432D454E43
+store_enc_iv_1 = 5706D7150FF90D002291C0F047103ECB
+store_encrypted_data = 5AD5EDB121AB670B52BAC33DD4B13F1A8CF24061FDF6ACC54ABCD0468BAD830F
+store_cmac = 125F8D2C35256CF76AC4388519A3106B
+
+install_plain_data = 08A0000047504F531608A0000047504F531608A0000047504F5316010000
+install_enc_iv_2 = F280A84E37CA36BEF39CED59FCDE85B3
+install_encrypted_data = 625D245744D7BE3F0C36CC2742414D3E224017062EF5E9DE62C021A5C4E63B2E
+install_cmac = 70F47623E9E77CF48753BF7FB68D1A3C

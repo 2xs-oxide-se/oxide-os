@@ -1,0 +1,360 @@
+\chapter{Registry, Persistence, and Transactional State Management}
+\label{chap:registry-persistence}
+
+The GlobalPlatform model described in Chapter~4 assumes that a secure
+element can remember what has been loaded, installed, personalized, keyed
+and made selectable. Oxide SE makes this assumption explicit through one
+kernel registry and one persistence strategy designed for small embedded
+targets.
+
+This chapter describes the architectural contract rather than a particular
+board implementation. Chapter~8 gives the implementation point of view;
+this chapter defines what the implementation must preserve.
+
+%--------------------------------------------------
+\section{Persistent Memory Model}
+\label{sec:persistence-memory-model}
+
+Oxide SE targets secure elements whose non-volatile storage is usually
+flash-like memory. Such memory is persistent, may also be executable, and
+is not byte-addressable in the same sense as RAM. The architecture
+therefore assumes the following properties.
+
+\begin{itemize}
+\item The firmware image may execute directly from flash, for example in an
+  execute-in-place configuration.
+\item A board may reserve a distinct flash area for mutable registry
+  persistence. This area must not overlap the immutable firmware image.
+\item Flash is erased by pages or sectors. After erase, bytes read as
+  \texttt{0xFF}.
+\item Programming can write a page or a subrange, but it must be treated as
+  non-atomic at the registry level.
+\item Power may be lost at any point during an erase or write operation.
+\end{itemize}
+
+The failure model is deliberately conservative. After a reset, a block that
+was being written when power disappeared may be partially programmed, may
+contain a mixture of old and new bytes, or may look erased in places. No
+registry state is considered valid merely because its header is present.
+Every committed persistent block must therefore carry enough information to
+validate itself independently.
+
+The fundamental validity rule is:
+
+\begin{quote}
+A persistent block is usable only if its magic value is known, its advertised
+length is page-aligned and inside the reserved persistence area, and its final
+checksum validates the complete block.
+\end{quote}
+
+This rule is intentionally simple. It avoids relying on hidden hardware
+transaction semantics and makes the same recovery logic applicable to real
+flash, emulated flash and future EEPROM-like backends.
+
+%--------------------------------------------------
+\section{Logical Registry Contract}
+\label{sec:registry-logical-contract}
+
+The registry is the authoritative catalogue of managed objects inside the
+secure element. It is a logical GlobalPlatform registry, not a collection of
+independent per-application stores. Security Domains define authority and
+visibility over registry objects, but the catalogue itself is one coherent
+kernel structure.
+
+Each registry entry has a common identity header:
+
+\begin{itemize}
+\item \textbf{object AID}: the stable identifier of the managed object;
+\item \textbf{parent Security Domain AID}: the administrative Security
+  Domain under whose authority the object exists;
+\item \textbf{kind}: the object family, plus kind-specific state bits;
+\item \textbf{data reference}: a reference to the persistent payload, when
+  such a payload exists.
+\end{itemize}
+
+The object kind determines how the payload is interpreted. Oxide SE uses
+the following managed-object families.
+
+\begin{center}
+\begin{tabular}{|l|p{8.5cm}|}
+\hline
+\textbf{Kind} & \textbf{Persistent meaning} \\
+\hline
+Security Domain &
+Administrative instance with a package binding, base privilege bytes and
+serialized Security-Domain state. \\
+\hline
+Package &
+Executable Rustlet package, normally a FAE image. A package may be embedded
+in immutable firmware or later stored in mutable persistence. \\
+\hline
+Instance &
+Installed Rustlet instance with a package binding and serialized application
+state. \\
+\hline
+Key &
+Cryptographic key object owned by a Security Domain, including key metadata
+such as type, version, identifier, usage and raw key material. \\
+\hline
+Data &
+Generic Security-Domain-scoped data object, typically written through
+\texttt{STORE DATA} and returned through \texttt{GET DATA} when no
+standard or Security-Domain-specific tag handler claims the request. \\
+\hline
+\end{tabular}
+\end{center}
+
+This representation separates three concerns that are easy to confuse:
+
+\begin{itemize}
+\item the AID identifies the object;
+\item the parent Security Domain defines the administrative authority;
+\item the payload contains the state or bytes specific to the object kind.
+\end{itemize}
+
+Consequently, a Rustlet instance does not itself carry Security-Domain
+privileges. Privilege bytes are properties of Security Domain objects.
+Ordinary Rustlet instances carry only their package binding and serialized
+state. Key objects are associated with a Security Domain through the same
+parent-AID relation as other managed objects.
+
+\subsection{GET DATA, STORE DATA, and Registry Fallback}
+\label{subsec:registry-get-store-data-fallback}
+
+\texttt{GET DATA} and \texttt{STORE DATA} are registry-facing management
+commands, but not every \texttt{GET DATA} tag is treated as a generic data
+object. Some tags are part of the Security Domain administrative interface
+itself. For example, the card recognition data tag \texttt{0066} and the
+card capability information tag \texttt{0067} are interpreted by the active
+Security Domain backend, while the life-cycle tag \texttt{9F70} is derived
+from its managed state. A stored registry data object must not override these
+special tags. Section~\ref{sec:gp-get-data-discovery} defines the public GP
+encoding of \texttt{0066} and \texttt{0067}.
+
+For all other tags, Oxide SE applies a conservative fallback rule. The
+active authority is resolved first: clear management commands are interpreted
+under the root Security Domain authority, while protected commands are
+interpreted under the Security Domain bound to the authenticated secure
+channel. \texttt{STORE DATA} then writes a generic \textbf{Data} object owned
+by that authority. A later \texttt{GET DATA} for the same non-special tag may
+return that object if the active Security Domain does not provide a more
+specific answer.
+
+Rustlet-backed Security Domains follow the same rule with one additional
+delegation step. The kernel first asks the selected Rustlet Security Domain
+whether it handles the requested tag. If the Rustlet Security Domain returns
+``unsupported'' for a non-special tag, the kernel may fall back to the
+registry-backed \textbf{Data} object. If the tag is special, no registry
+fallback is applied: the Security Domain answer remains authoritative.
+
+\texttt{GET STATUS} is a distinct registry projection rather than a generic
+data-object lookup. It enumerates packages, ordinary instances and Security
+Domains as GP \texttt{E3} records, subject to the active authority's hierarchy
+and privileges. Internal \textbf{Key} and \textbf{Data} objects are deliberately
+excluded: discovery may report cryptographic capabilities, but it never
+discloses key material or private registry values. Continuation state records
+only the next stable registry slot and the canonical query; it does not retain
+a copied registry object or response page.
+
+Persistence is the storage mechanism behind this logical registry. It does
+not change the registry semantics. A registry mutation such as installing an
+instance, updating serialized state, loading a package, adding a key or
+deleting an object first changes the logical registry state. The persistence
+layer then publishes a durable representation of that new state.
+
+%--------------------------------------------------
+\section{Append-Only Transactional Registry}
+\label{sec:append-only-transactional-registry}
+
+Oxide SE uses an append-only flash journal for the mutable registry. The
+goal is not to implement a complex filesystem. The goal is to make registry
+updates robust against the one failure that matters most for small secure
+elements: power loss during a flash operation.
+
+\subsection{Personalization Marker}
+\label{subsec:persistence-personalization-marker}
+
+The first page of the reserved persistence area carries a personalization
+marker. If this marker is absent or invalid, the secure element treats the
+registry as unpersonalized. It then replays the predeployment manifest,
+builds the initial registry in RAM, publishes that registry to flash and
+finally leaves the marker in place.
+
+The marker is not a registry block. It answers only one question: has the
+mutable persistence area already been initialized for this image? The
+registry state itself is always recovered from the latest valid registry
+block.
+
+\subsection{Block Families}
+\label{subsec:persistence-block-families}
+
+Every persistent object is stored as a page-aligned block. Each block starts
+with a magic word and ends with a checksum. The currently defined block
+families are:
+
+\begin{center}
+\begin{tabular}{|l|l|p{7.5cm}|}
+\hline
+\textbf{Magic} & \textbf{Name} & \textbf{Purpose} \\
+\hline
+\texttt{0x600DB055} & \texttt{BOSS} &
+Registry block. The valid block with the highest mutation counter is the
+authoritative registry. \\
+\hline
+\texttt{0x600DC0DE} & \texttt{C0DE} &
+Executable package payload, typically a FAE image. \\
+\hline
+\texttt{0x600DBA5E} & \texttt{BA5E} &
+Generic registry data, including key-like binary payloads when appropriate. \\
+\hline
+\texttt{0x600DFACE} & \texttt{FACE} &
+Serialized runtime state, including Rustlet instance state and
+Security-Domain state. \\
+\hline
+\end{tabular}
+\end{center}
+
+The registry block has the following logical layout:
+
+\begin{center}
+\begin{tabular}{|l|p{8.5cm}|}
+\hline
+\textbf{Field} & \textbf{Meaning} \\
+\hline
+magic & \texttt{0x600DB055}. \\
+\hline
+total length & Page-aligned length of the complete block. \\
+\hline
+mutation counter & Monotonic counter incremented for each committed
+registry mutation. \\
+\hline
+entry count & Number of registry entries stored in this block. \\
+\hline
+entries & Fixed-size registry entries. Each entry contains encoded object
+AID, encoded parent Security Domain AID, kind word and data reference. \\
+\hline
+checksum & Final checksum over the complete block except the checksum field
+itself. \\
+\hline
+\end{tabular}
+\end{center}
+
+Object blocks use the simpler layout:
+
+\begin{center}
+\begin{tabular}{|l|p{8.5cm}|}
+\hline
+\textbf{Field} & \textbf{Meaning} \\
+\hline
+magic & One of \texttt{C0DE}, \texttt{BA5E} or \texttt{FACE}. \\
+\hline
+total length & Page-aligned length of the complete block. \\
+\hline
+payload length & Exact useful length of the payload. \\
+\hline
+payload & Object bytes interpreted according to the block family and
+registry kind. \\
+\hline
+checksum & Final checksum over the complete block except the checksum field
+itself. \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Dynamic Package Loading}
+\label{subsec:persistence-dynamic-package-loading}
+
+Dynamic executable loading is represented in the persistent registry by
+\texttt{C0DE} object blocks. The GlobalPlatform command sequence is described
+from the APDU point of view in Chapter~\ref{ch:communication-protocol}; this
+section describes only the registry-side effect of that sequence.
+
+\texttt{INSTALL [for load]} opens a volatile load transaction. It announces
+the package AID, the expected package size and the expected package hash. If
+the selected Security Domain authorizes the load, the kernel reserves one
+page-aligned \texttt{C0DE} span large enough to hold the full package payload
+and its persistent block metadata. This reservation is not a registry commit:
+no \texttt{BOSS} block references the new package yet.
+
+Each following \texttt{LOAD} command appends one consecutive fragment into the
+reserved \texttt{C0DE} payload area. The persistent object header remains
+kernel metadata. The executable FAE image starts after that header, at the
+common object-payload offset, and the Rustlet runtime is later given exactly
+that payload slice. The kernel therefore never branches to the \texttt{C0DE}
+magic word or to the persistent length fields.
+
+The final \texttt{LOAD} command may publish the package only if all load
+invariants hold:
+
+\begin{itemize}
+\item block numbers were received consecutively;
+\item the total number of received bytes is exactly the size announced by
+  \texttt{INSTALL [for load]};
+\item no fragment wrote beyond the reserved package payload;
+\item the computed package hash matches the announced hash;
+\item the final \texttt{C0DE} checksum validates.
+\end{itemize}
+
+Only after those checks does the kernel insert the Package object into the
+in-RAM registry and publish a new \texttt{BOSS} block that references the
+\texttt{C0DE} block. An interrupted load, a wrong hash, an incomplete final
+block or an invalid checksum leaves no committed Package object behind. Such a
+\texttt{C0DE} span is simply an unreferenced object block and can be recycled
+by the normal journal rules.
+
+Predeployed packages follow the same logical registry model, but their
+payloads may live in the immutable firmware image rather than in the mutable
+registry flash area. Registry references therefore distinguish firmware-image
+payloads from registry-flash payloads while keeping the same logical Package
+object kind.
+
+\subsection{Commit Rule}
+\label{subsec:persistence-commit-rule}
+
+The transaction rule is intentionally strict:
+
+\begin{quote}
+The payload block for a new or modified object is written first. Only after
+that payload is durable may a new \texttt{BOSS} block be written to reference
+it.
+\end{quote}
+
+The existing \texttt{BOSS} block is never overwritten in place. If power is
+lost while the new payload is being written, the old \texttt{BOSS} still
+points to the old object. If power is lost while the new \texttt{BOSS} is
+being written, its checksum will not validate and recovery will again select
+the previous valid \texttt{BOSS}.
+
+At boot, recovery scans the complete reserved persistence area. Erased pages
+are valid free pages, not end markers. The scanner therefore keeps walking
+after erased pages, because older valid blocks may still exist later in the
+circular journal. Among all valid registry blocks found, the block with the
+highest mutation counter is selected as the authoritative registry.
+
+\subsection{Recycling Rule}
+\label{subsec:persistence-recycling-rule}
+
+Old blocks may be recycled only when they are no longer needed by the latest
+valid registry. In the common case, this means:
+
+\begin{itemize}
+\item the latest valid \texttt{BOSS} block is protected;
+\item every object block referenced by that \texttt{BOSS} is protected;
+\item erased pages may be reused;
+\item older valid blocks not referenced by the latest \texttt{BOSS} may be
+  reused if their whole page-aligned span is large enough.
+\end{itemize}
+
+There is one additional transactional invariant. A registry update is one
+logical mutation followed by one new \texttt{BOSS} publication. During that
+publication, the previous \texttt{BOSS} remains the recovery root. Therefore
+the old payload replaced or deleted by that one mutation must not be
+considered free until the new \texttt{BOSS} has been completely written and
+validated. Since Oxide SE does not batch several registry mutations before a
+registry publication, there can be at most one such old-only payload per
+in-flight transaction.
+
+This rule is the small but important distinction between ``not referenced by
+the new registry'' and ``safe to erase now''. A block becomes safely
+recyclable only after there exists a newer valid \texttt{BOSS} whose recovery
+does not require that block.

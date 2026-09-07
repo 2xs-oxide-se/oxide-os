@@ -1,0 +1,19 @@
+# Default Oxide SE predeployment manifest.
+# This produces a development Secure Element image with one root
+# NullSecurityDomain opened with all install bytes set and no pre-installed
+# Rustlets, keys, or other registry objects.
+#
+# To build another embedded administrative shape, use xtask with
+# `--config=...`, for example:
+# `cargo run build --config=configs/config_scp03_test.toml`
+
+[secure_channel]
+protocols = []
+
+[root.package]
+name = "NullSecurityDomain"
+aid = "A0:00:00:47:50:4F:53:01"
+
+[root.instance]
+aid = "A0:00:00:47:50:4F:53:01"
+install_bytes = "FF:FF:FF"

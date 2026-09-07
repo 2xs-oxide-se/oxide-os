@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "alloc_free_test",
+    "apdus_test",
+    "crypto_test",
+    "declare_macro_forms",
+    "ecdh_test",
+    "getting_started_test",
+    "heap_form_test",
+    "isolation_fault_test",
+    "minimal_valid_test",
+    "serialization_test",
+    "stack_overflow_test",
+    "state_test",
+    "string_test",
+    "termination_test",
+    "trampoline_return_test",
+    "xtask",
+]
+default-members = ["xtask"]
+resolver = "2"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

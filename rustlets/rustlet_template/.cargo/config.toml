@@ -1,0 +1,2 @@
+[alias]
+build-fae = "run --manifest-path xtask/Cargo.toml -- build-fae"

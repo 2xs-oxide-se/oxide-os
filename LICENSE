@@ -1,0 +1,28 @@
+GPOS licensing notice
+====================
+
+Copyright (C) 2026 Gilles Grimaud
+Copyright (C) contributors to this repository
+
+This repository is distributed under the terms of the CeCILL Free
+Software License Agreement, version 2.1.
+
+The official CeCILL v2.1 texts included in this repository are:
+
+- LICENSES/CECILL-2.1-fr.html
+- LICENSES/CECILL-2.1-en.html
+
+These files were obtained from the official CeCILL website published by
+CEA, CNRS and Inria.
+
+This repository also contains a project-specific syscall interface
+exception in LICENSE_EXCEPTION. That additional permission applies only
+to this repository and only to the extent that the relevant copyright
+holders may grant it for their own contributions.
+
+Unless a file states otherwise, contributions to this repository are
+made available under CeCILL v2.1 together with the project-specific
+exception described in LICENSE_EXCEPTION.
+
+The software is provided "as is", without warranty, under the conditions
+set out in CeCILL v2.1.

@@ -1,0 +1,14 @@
+[package]
+name = "core_test"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false
+
+[[bin]]
+name = "core_test"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+oxi_core = { path = "../kernel/core" }

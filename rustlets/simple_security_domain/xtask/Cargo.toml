@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "simple_security_domain_xtask"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false

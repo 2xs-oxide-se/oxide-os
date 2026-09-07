@@ -1,0 +1,16 @@
+[root.package]
+name = "NullSecurityDomain"
+aid = "A0:00:00:47:50:4F:53:01"
+
+[root.instance]
+aid = "A0:00:00:47:50:4F:53:01"
+install_bytes = "FF:FF:FF"
+
+[[root.packages]]
+path = "./rustlets/tests/minimal_valid_test"
+
+[[root.packages]]
+path = "./rustlets/tests/termination_test"
+
+[[root.packages]]
+path = "./rustlets/tests/isolation_fault_test"

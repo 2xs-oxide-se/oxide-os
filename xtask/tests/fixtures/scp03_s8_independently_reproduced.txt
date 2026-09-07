@@ -1,0 +1,49 @@
+# SCP03 S8 reference vector set.
+#
+# Provenance:
+# - Reference vectors independently reproduced from OpenSCDP and
+#   GlobalPlatformPro behavior, cross-checked against the public SCP03
+#   specification.
+# - These are not official GlobalPlatform certification vectors.
+#
+# Profile:
+# - SCP03 S8
+# - AES-128 static ENC/MAC keys
+# - 8-byte host/card challenges
+# - 8-byte authentication cryptograms
+# - 8-byte truncated C-MAC/R-MAC
+
+profile = S8
+static_enc_key = 404142434445464748494A4B4C4D4E4F
+static_mac_key = 505152535455565758595A5B5C5D5E5F
+host_challenge = 0102030405060708
+card_challenge = 525553544C455430
+context = 0102030405060708525553544C455430
+
+card_cryptogram = D2645A968D5F52F0
+host_cryptogram = CC0CA1F02AD3F24C
+session_enc_key = 221CFF32261C46C2C8337E6611AA1858
+session_mac_key = 6AC49D7DD906EEE5F93B92DE770F925F
+session_rmac_key = 7853C2D80B5F248D89370E1029117C4E
+
+external_authenticate_header = 8482010010
+external_authenticate_cmac = 6C0042172B28D669F9266A2E536E3D9E
+
+protected_get_data_header = 84CA9F7008
+protected_get_data_cmac = FAA902DF27EDB220
+protected_get_data_response = 9F700107
+protected_get_data_rmac = B246A0C469F1AA73
+
+response_enc_iv_1 = C5BE6EF8F98A3C03D07F6E065F611EBA
+encrypted_lifecycle_response = CB48EDE40AF8B95A473AC9AE8108CFC7
+encrypted_lifecycle_rmac = 8AD65B9FDDEA48D6
+
+store_plaintext = 527573746C65744F5320534350303320432D454E43
+store_enc_iv_1 = CC1B5925B23B5F311617166EB5DC1766
+store_encrypted_data = 891DEC51EF58170F0BE858218611F575A9B13B6BCF51AC5FDA88DE18567ADE43
+store_cmac = 5DB4879F24892579
+
+install_plain_data = 08A0000047504F531608A0000047504F531608A0000047504F5316010000
+install_enc_iv_2 = 0C2874BE940015A5659739F02C8705A5
+install_encrypted_data = 00B2E20CEC8AB66711E711D2403722164FAD5EAD0E7CD28F530EA19B85711EB5
+install_cmac = 46C8F58DAEDD670E

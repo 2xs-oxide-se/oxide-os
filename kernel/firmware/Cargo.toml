@@ -1,0 +1,24 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+rustlet_runtime = { path = "../../rustlets/rustlet_runtime" }
+oxi_core = { path = "../core" }
+sha2 = { version = "0.10.9", default-features = false }
+
+[dev-dependencies]
+oxi_core = { path = "../core", features = ["host-test"] }
+
+[build-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8.23"

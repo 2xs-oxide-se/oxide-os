@@ -1,0 +1,1054 @@
+\chapter{GlobalPlatform Object and Administration Model}
+
+This chapter defines the object, authority, and lifecycle model against which
+oXiDe SE is designed. Chapter~3 introduced the protocol vocabulary---APDUs,
+GlobalPlatform commands, selection, and Secure Channels. The present chapter
+answers the corresponding stateful questions: \emph{which resident entities
+are addressed by those commands, how are they related, and under whose
+authority may they be managed?}
+
+Three kinds of statement are kept distinct throughout the chapter:
+
+\begin{description}
+\item[GlobalPlatform reference model.] These paragraphs summarize the
+      concepts and command semantics defined by the GlobalPlatform Card
+      Specification.
+\item[oXiDe SE implementation contract.] These paragraphs state the
+      architecture and invariants that an oXiDe SE implementation is expected
+      to enforce. They are design requirements, not claims of formal proof.
+\item[Beta implementation status.] These paragraphs identify the implemented
+      subset and the remaining validation or implementation work. Detailed
+      mechanisms and evidence are deferred to the implementation and test
+      chapters.
+\end{description}
+
+This separation is important. Compatibility with the GlobalPlatform object
+model does not require oXiDe SE to reproduce every optional management mode,
+and an internal oXiDe SE representation must not be mistaken for a structure
+mandated by GlobalPlatform.
+
+%--------------------------------------------------
+\section{Platform Object Model}
+\label{sec:gp-object-model}
+
+% Plan:
+% - define the main GP-managed entities
+% - explain that AIDs are the stable identifiers used by registry and dispatch
+% - distinguish executable content, installed instances, and security authorities
+% - introduce the registry view as the structured catalog of those entities
+
+\subsection{GlobalPlatform Reference Entities}
+
+GlobalPlatform does not begin from a process model or an operating-system
+abstraction. It begins from managed entities resident on the secure element
+and from the relationships between them. The principal reference entities are
+\gpref{gp-card}{§7, §9, §11}:
+
+\begin{itemize}
+\item an \textbf{Executable Load File}, which represents deployable code
+  transported to the secure element through the loading protocol;
+\item an \textbf{Executable Module}, which identifies installable code within
+  an Executable Load File;
+\item an \textbf{Application}, or more precisely an installed application
+  instance, which may later be selected and addressed through APDUs;
+\item a \textbf{Security Domain}, which is also an application-like
+  resident entity but with management responsibilities, privileges, and
+  associated cryptographic material;
+\item the unique \textbf{Issuer Security Domain} of one GlobalPlatform
+  environment, which is the first application and has the special role
+  defined by the Card Specification.
+\end{itemize}
+
+These entities are not merely names in a registry. They are the objects
+whose lifecycle is controlled by commands such as \texttt{LOAD},
+\texttt{INSTALL}, \texttt{DELETE}, \texttt{SET STATUS}, and
+\texttt{GET STATUS}. The command vocabulary introduced in Chapter~3
+therefore only becomes meaningful once these entities have been
+distinguished.
+
+Conceptually, the \textbf{GlobalPlatform Registry} is the organized view of
+the managed world inside the secure element. It records which load files,
+modules, applications, and Security Domains exist, how they are associated,
+and which privileges and lifecycle states apply. Security-Domain keys and data
+belong to the administrative model, but representing each key as an
+AID-addressable registry object is not required by GlobalPlatform.
+
+\subsection{oXiDe SE Managed Objects}
+
+oXiDe SE implements one persistent registry containing packages, Rustlet
+instances, Security Domain instances, key objects, and generic data objects.
+Using the same bounded representation for these families is an oXiDe SE design
+choice. It permits the same ownership, persistence, lifecycle, and deletion
+rules to be applied consistently, while command handlers retain the distinct
+GlobalPlatform semantics of each object family.
+
+One oXiDe package record represents one FAE Executable Load File and records
+the single Executable Module AID from which its Rustlet instances may be
+created. Executable Modules are therefore projected in \texttt{GET STATUS},
+but are not independently stored or lifecycle-managed registry entries. A
+multi-module Executable Load File is outside the beta model.
+
+Every managed object is attached to an administrative Security Domain. The
+internal field \path{parent_sd_aid} records that containment relation. One
+exception is structural: the oXiDe Root Security Domain has no parent and is
+the unique root of the internal registry tree. This root is an oXiDe SE
+platform entity; it is not necessarily the GlobalPlatform Issuer Security
+Domain.
+
+%--------------------------------------------------
+\subsection{Object Identification}
+\label{sec:gp-object-identification}
+
+% Plan:
+% - explain AIDs as the primary GP identifiers
+% - distinguish load-file AID, application-instance AID, and security-domain AID
+% - state uniqueness and role in selection, management, and registry references
+
+The primary identifier used throughout GlobalPlatform is the
+\textbf{Application Identifier} (AID). Even though the name comes from
+ISO/IEC~7816 and from the application-selection model, GlobalPlatform
+uses AIDs more broadly: an AID identifies not only a selectable
+application instance, but also Security Domains and load-file-related
+objects referenced by management commands \gpref{gp-card}{§7, §11}.
+
+Several distinct AIDs may therefore coexist for conceptually related
+objects:
+
+\begin{itemize}
+\item an \textbf{Executable Load File AID} identifies the executable content being
+  transported and installed;
+\item an \textbf{Application AID} identifies an installed instance that
+  may later become selectable;
+\item a \textbf{Security Domain AID} identifies the administrative
+  entity under whose authority management actions are performed.
+\end{itemize}
+
+This distinction matters because GlobalPlatform deliberately separates
+deployable code, installed instances, and administrative authority. A
+single load file may give rise to one or more installed instances, and
+those instances may later be placed under the responsibility of a given
+Security Domain. The identifiers must therefore remain stable across
+management operations and allow those relationships to be expressed
+explicitly.
+
+From a protocol perspective, AIDs are also the bridge between the APDU
+world and the object model. They appear in \texttt{SELECT}, in
+\texttt{INSTALL} parameters, in registry-oriented queries, and in
+administrative operations such as deletion or lifecycle updates. An AID
+is therefore not just a name looked up at selection time; it is the
+stable handle by which GlobalPlatform refers to a managed secure-element
+entity across
+its whole management model.
+
+For an off-card operator, a minimal useful set of identifiers is
+therefore:
+\begin{itemize}
+\item the AID of the oXiDe Root Security Domain when a platform-wide
+  administration operation is intentionally requested;
+\item the AID of the Issuer Security Domain, when one is present, which is the
+  usual entry point for secure-element administration;
+\item the AID of any supplementary Security Domain used for delegated or
+  specialized administration;
+\item the AID of the target application instance to be selected or
+  personalized;
+\item the AID of the corresponding load file when deployment or removal
+  operations are performed.
+\end{itemize}
+
+The Root Security Domain AID and an Issuer Security Domain AID designate
+different roles even when a particular configuration chooses the same backend
+implementation for both. The former selects the oXiDe SE platform root; the
+latter, when declared, selects the unique Issuer Security Domain of the
+GlobalPlatform environment.
+
+%--------------------------------------------------
+\subsection{Object Relationships}
+\label{sec:gp-object-relationships}
+
+% Plan:
+% - explain dependency graph between load files, apps, and security domains
+% - explain associated security-domain relationship
+% - introduce the idea that management invariants arise from these relations
+
+The GlobalPlatform object model is relational rather than flat. The most
+important relationships are:
+
+\begin{itemize}
+\item an installed application instance depends on executable content
+  that was previously made present on the secure element through the loading
+  process;
+\item an application instance is associated with a Security Domain that
+  acts as its administrative authority;
+\item a Security Domain owns keys, privileges, and management authority
+  that are distinct from the application business logic itself.
+\end{itemize}
+
+These relationships are not optional conceptual decorations. They are
+what gives management commands their preconditions and their effects. An
+application cannot be installed if the relevant executable content is not
+present; a simple load-file deletion cannot proceed while installed instances
+still depend on it, whereas cumulative deletion explicitly includes related
+objects; a sensitive management action is interpreted under the authority
+of a Security Domain rather than under the identity of an arbitrary
+selected application.
+
+\subsection{GlobalPlatform Association Forest}
+
+GlobalPlatform associates each Application and Executable Load File with a
+Security Domain. Because a Security Domain is itself an Application, Security
+Domains may form association hierarchies. The Issuer Security Domain is
+effectively associated with itself. GlobalPlatform also permits another
+Security Domain to become self-associated through extradition, thereby forming
+the root of another association hierarchy \gpref{gp-card}{§7.1, §7.2}.
+
+There is no contradiction between one Issuer Security Domain and several
+association hierarchies. Only one root has the special Issuer Security Domain
+role. Other self-associated roots remain supplementary Security Domains. Their
+providers may use distinct keys and administer content independently of the
+Card Issuer's ordinary management context.
+
+The GlobalPlatform association model is therefore a forest. Its usual shape
+has the Issuer Security Domain at the root of the principal hierarchy, with
+most supplementary Security Domains below it. Additional self-associated
+Security Domains may head detached hierarchies.
+
+\subsection{oXiDe SE Internal Root and Tree Projection}
+
+oXiDe SE represents that forest as one internal tree by adding a unique
+technical root:
+
+\begin{verbatim}
+oXiDe Root Security Domain
+|-- Issuer Security Domain
+|   |-- ordinary Security Domain A
+|   `-- ordinary Security Domain B
+`-- detached Security Domain C
+    `-- ordinary Security Domain C.1
+\end{verbatim}
+
+In a production-oriented composition, at least the oXiDe Root Security Domain
+and the Issuer Security Domain are normally pre-deployed. The Issuer Security
+Domain is explicitly marked as such and is a direct child of the root;
+ordinary Security Domains are normally attached to the Issuer Security Domain
+or one of its descendants. A GlobalPlatform hierarchy detached from the Issuer
+hierarchy is represented internally by attaching its self-associated root
+directly to the oXiDe root. Development compositions may deliberately declare
+only the technical root and therefore have no distinct Issuer Security Domain.
+
+The first internal edge has a different interpretation from an ordinary
+GlobalPlatform association. In the GlobalPlatform-facing projection, the
+Issuer Security Domain and every detached hierarchy root are self-associated.
+Their internal parent is the oXiDe root only for platform containment,
+visibility, persistence, and recovery. Registry responses must preserve this
+distinction and must not accidentally expose the technical root as the
+GlobalPlatform associated Security Domain of those roots.
+
+\subsection{Uniform Subtree Visibility}
+
+oXiDe SE gives the internal tree one uniform operational interpretation. A
+Security Domain may resolve its own objects and every object contained in its
+descendant Security Domains. It cannot resolve objects owned by an ancestor or
+by a sibling branch. Objects outside that view are treated as absent for the
+administrative operation, which avoids disclosing their existence.
+
+For every Security Domain $S$, let $V(S)$ be its visible registry set. If $C$
+is a child of $P$, the structural invariant is:
+
+\begin{center}
+$V(C) \subseteq V(P)$.
+\end{center}
+
+The root's descendants are all managed objects, so $V(root)$ is the complete
+registry. The Issuer Security Domain sees the usual Issuer hierarchy but not a
+detached root or its descendants. Two detached hierarchies are mutually
+invisible. A newly created object is attached to the active Security Domain
+that authorizes its creation. In the beta, detached hierarchy roots may be
+declared by predeployment beneath the technical root; post-issuance
+extradition and reattachment are not implemented.
+
+Visibility is necessary but not sufficient for authorization. Command type,
+delegated privileges, Secure Channel state, lifecycle, dependency checks, and
+the selected Security Domain's own policy remain mandatory after lookup.
+
+\subsection{Uniform Authority and Monotone Delegation}
+\label{sec:gp-privilege-delegation}
+
+When this chapter speaks about Security-Domain ``rights'', it does not mean
+ordinary application permissions. It means GlobalPlatform administrative
+privileges: the authority to perform families of management operations on
+resident objects. Examples include loading executable content, installing an
+application instance, deleting managed objects, changing lifecycle state,
+managing secure-channel keys, performing delegated management, requesting or
+verifying deployment tokens, generating receipts, or exercising card-level
+lock and termination operations.
+
+These privileges are attached to Security Domain instances. An ordinary
+application instance does not become a management authority merely because it
+lives under a privileged Security Domain. It is administered by that Security
+Domain, and it may rely on services made available through that association,
+but registry mutation and platform administration remain Security-Domain
+authority.
+
+GlobalPlatform defines specialized privileges whose roles are not, by
+themselves, a simple parent-to-child lattice. oXiDe SE deliberately imposes a
+stricter and more uniform rule: a Security Domain may delegate only authority
+that it already possesses, and a child must not receive a broader privilege
+set than its parent. If $R(S)$ denotes the operations granted to $S$, then:
+
+\begin{center}
+$R(C) \subseteq R(P)$.
+\end{center}
+
+Combined with subtree visibility, this gives
+$V(C) \subseteq V(P)$ and $R(C) \subseteq R(P)$. Administrative delegation
+may restrict or subdivide authority; it cannot amplify either its operations
+or its reach.
+
+GlobalPlatform's \emph{Global Delete}, \emph{Global Lock}, and
+\emph{Global Registry} are privileges, not distinct instruction bytes. In the
+reference model, an Application or Security Domain holding the corresponding
+privilege may act independently of ordinary Security-Domain association or
+hierarchy restrictions \gpref{gp-card}{§9.1.3.4--§9.1.3.5, §9.6.5}.
+
+oXiDe SE intentionally adopts a narrower beta contract. Only the technical
+root obtains transverse reach, as a consequence of being the ancestor of every
+internal hierarchy. A non-root Security Domain never escapes its subtree, even
+if its stored privilege bytes contain a Global Delete, Global Lock, or Global
+Registry bit. The common mutation and query primitives remain parameterized by
+an authority AID; invoking them with the root AID gives them complete reach
+without bypassing registry, lifecycle, persistence, or dependency checks. This
+is an explicit oXiDe SE profile restriction relative to the GlobalPlatform
+privilege semantics, not a restatement of the standard.
+
+%--------------------------------------------------
+\subsection{Selected Context and Visible Endpoints}
+\label{sec:gp-selected-context}
+
+% Plan:
+% - explain what a host actually addresses when talking to the card
+% - distinguish selected Security Domain and selected ordinary application
+% - connect this to Chapter 3 without entering kernel design
+
+From the point of view of an external management tool, the secure
+element does not expose a single flat command receiver. It exposes a set
+of \textbf{selectable contexts}. Through \texttt{SELECT}, the off-card
+entity chooses which AID becomes the current communication endpoint. Four
+situations matter most:
+
+\begin{itemize}
+\item the \textbf{oXiDe Root Security Domain} is selected for an explicitly
+  platform-wide operation. Its ordinary subtree is the complete registry;
+\item a \textbf{Security Domain} is selected, typically the Issuer
+  Security Domain, and subsequent commands are interpreted in the
+  administrative plane of the secure element;
+\item an \textbf{ordinary application} is selected, and subsequent
+  commands are interpreted according to that application's own semantics;
+\item no application-specific management action is possible until the
+  appropriate administrative context has first been selected.
+\end{itemize}
+
+This explains an important operational distinction already hinted at in
+Chapter~3. Commands such as \texttt{LOAD}, \texttt{INSTALL},
+\texttt{DELETE}, \texttt{PUT KEY}, \texttt{GET STATUS}, or
+\texttt{INITIALIZE UPDATE} are not merely generic APDU opcodes that can
+be sent to any selected endpoint. They are meaningful only in the
+appropriate administrative context, i.e. under a Security Domain
+authorized to interpret them.
+
+In oXiDe SE this authorization is not modeled as a collection of
+independent ad hoc checks spread across the kernel. The object registry is
+also the visibility boundary for the resolved administrative authority. A
+lookup under one Security Domain resolves only within the subtree
+administratively reachable from that Security Domain. An object outside this
+visible subtree is treated as absent in that context. This design makes the
+management rule above mechanically enforceable: the resolved authority may
+act on its own objects and on objects of its descendants, while new objects
+are created under that authority.
+
+The beta resolves that authority differently for its two supported development
+paths. A protected management APDU is bound to the active Security Domain and
+its Secure Channel. A clear management APDU is bound to the technical root and
+is accepted only by a permissive root backend such as
+\texttt{NullSecurityDomain}. Selecting a child Security Domain does not make
+clear management APDUs execute under that child. Logical-channel-specific
+selection and Secure Channel contexts remain future work.
+
+Conversely, once an application instance has been selected, the same APDU
+transport is used, but the semantics changes entirely: the secure element
+interprets the APDU according to the application contract rather than
+according to the GlobalPlatform administration model.
+
+%--------------------------------------------------
+\section{Lifecycle Model}
+\label{sec:gp-lifecycle-model}
+
+% Plan:
+% - define lifecycle as state machine over GP objects
+% - explain that transitions are command-driven and constrained
+% - prepare the object-specific lifecycle subsections
+
+GlobalPlatform associates lifecycle states with the principal managed
+objects on the secure element. A lifecycle state is more than a diagnostic label:
+it controls what operations are currently permitted on a given entity and
+which command sequences remain legal \gpref{gp-card}{§9.6, §11}.
+
+Conceptually, the lifecycle model combines three ideas:
+
+\begin{itemize}
+\item a managed object is always in a well-defined state;
+\item only certain transitions are allowed from a given state;
+\item commands such as \texttt{INSTALL}, \texttt{SET STATUS},
+  \texttt{DELETE}, and \texttt{SELECT} are interpreted against that
+  state machine rather than in isolation.
+\end{itemize}
+
+This is why administration and deployment cannot be described purely as a
+list of commands. They are organized as stateful workflows. A load-file
+transfer, an application installation, a personalization session, or a
+deletion sequence only make sense because the addressed object moves
+through allowed states and because invalid transitions are rejected.
+
+For a security specialist using the secure element, the practical consequence is
+that the current state of the addressed object is always part of the
+precondition of a command. A management script therefore needs more than
+an AID and an opcode: it needs a correct view of whether the target load
+file is present, whether the application instance already exists, whether
+it is selectable, and whether the selected Security Domain is currently
+allowed to perform the requested transition.
+
+GlobalPlatform defines object-specific lifecycle models
+\gpref{gp-card}{§5.2--§5.3}. An Executable Load File has only the
+\texttt{LOADED} state. An ordinary Application has \texttt{INSTALLED},
+\texttt{SELECTABLE}, and \texttt{LOCKED} states, plus any application-specific
+states. A supplementary Security Domain has \texttt{INSTALLED},
+\texttt{SELECTABLE}, \texttt{PERSONALIZED}, and \texttt{LOCKED} states. The
+Issuer Security Domain instead inherits the Card Life Cycle State. The
+following subsections do not replace those definitions. They describe the
+deliberately smaller and partly implementation-specific projection used by the
+oXiDe SE beta registry.
+
+Absence, deletion, and failed installation are represented by the absence of a
+committed registry entry, not by an additional lifecycle value. oXiDe SE uses
+one compact state pair per ordinary managed-object family:
+
+\begin{center}
+\begin{tabular}{p{0.22\textwidth}p{0.22\textwidth}p{0.42\textwidth}}
+\textbf{Object family} & \textbf{States} & \textbf{Operational guard} \\
+\hline
+\texttt{Package} & \texttt{Loaded}, \texttt{Locked} &
+  only \texttt{Loaded} packages may be instantiated; \texttt{Locked} is an
+  oXiDe extension, not a GlobalPlatform Executable Load File state; \\
+\texttt{Instance} & \texttt{Selectable}, \texttt{Locked} &
+  only \texttt{Selectable} instances may be selected; \\
+\texttt{SecurityDomain} & \texttt{Selectable}, \texttt{Locked} &
+  only \texttt{Selectable} Security Domains may be selected or used to open a
+  secure channel; \\
+\texttt{Key} & \texttt{Active}, \texttt{Locked} &
+  only \texttt{Active} keys may be used by secure-channel derivation; these are
+  internal oXiDe states, not GlobalPlatform Registry lifecycle values.
+\end{tabular}
+\end{center}
+
+The internal \texttt{Locked} state is conservative. It keeps the object
+visible to management code, but prevents the operation that would normally
+make the object effective: instantiating a package, selecting an instance,
+opening a secure channel through a Security Domain, or deriving session keys
+from a key object. The data model can represent all four locked forms, but the
+current APDU surface does not expose all their transitions. Future profiles
+may add richer state values, but those values are not part of the beta
+lifecycle contract.
+
+The oXiDe root is not an ordinary GlobalPlatform lifecycle object: it exists
+from bootstrap, has no parent, and cannot be deleted or have its state changed
+through the beta management APDUs. The Issuer Security Domain is also distinct
+from an ordinary supplementary Security Domain because GlobalPlatform makes it
+inherit the Card Life Cycle State. The beta registry nevertheless stores both
+Issuer and supplementary Security Domains using the compact
+\texttt{Selectable}/\texttt{Locked} pair. Card lifecycle and the complete
+Issuer lifecycle projection are not implemented.
+
+%--------------------------------------------------
+\subsection{Application Lifecycle}
+\label{sec:gp-lifecycle-application}
+
+% Plan:
+% - describe the conceptual lifecycle of an application instance
+% - emphasize installation, selectability, locking, and administrative control
+% - link conceptually to INSTALL / SET STATUS without implementation details
+
+For an application instance, the retained lifecycle distinction is simple:
+the instance is either selectable or locked. GlobalPlatform distinguishes
+installation from the transition that makes an instance selectable. The beta
+profile currently uses the combined \texttt{INSTALL [for install and make
+selectable]} form and creates the instance directly in the
+\texttt{Selectable} state when policy, package lookup, and the Rustlet
+installation call all succeed. A failed installation does not create a stable
+registry object.
+
+The practical consequence is that \texttt{SELECT} is authorized by the
+instance state. A \texttt{Selectable} instance may become the current
+application context; a \texttt{Locked} instance remains known to management
+code but cannot be selected. Deletion removes the registry entry and therefore
+returns the instance to the operationally absent condition.
+
+The normal application-instance transitions are:
+
+\begin{itemize}
+\item \textbf{absent to selectable}: caused in the beta profile by the
+  successful combined install-and-make-selectable form of \texttt{INSTALL}.
+\item \textbf{selectable to locked}: represented by the beta's restricted
+  \texttt{SET STATUS} path or by kernel policy.
+\item \textbf{locked to selectable}: represented by the same restricted
+  path. The full GlobalPlatform status-type and previous-state rules are not
+  yet implemented.
+\item \textbf{selectable or locked to absent}: caused by \texttt{DELETE},
+  provided dependency and privilege checks allow removal.
+\end{itemize}
+
+\texttt{SELECT} itself does not install an application and does not create a
+new lifecycle state. It only makes an already selectable application the
+current execution context. Conversely, deselection is a change of current
+context, not a registry lifecycle transition.
+
+%--------------------------------------------------
+\subsection{Load File Lifecycle}
+\label{sec:gp-lifecycle-loadfile}
+
+% Plan:
+% - explain load files as deployable content with their own lifecycle
+% - distinguish load-file presence from application-instance usability
+% - explain dependency constraints on removal
+
+The lifecycle of executable content is different from that of application
+instances. A package is first transported, validated and committed as executable
+content. Its conceptual role is to make code available on the secure element so
+that one or more application instances may later be installed from it.
+
+This means that a load file may exist even when no currently selectable
+application has yet been created from it, and conversely that an
+installed application may continue to depend on that load file for as
+long as the instance exists. The load-file lifecycle therefore captures
+availability and dependency rather than direct selectability.
+
+From a management perspective, this is what explains the asymmetry
+between \texttt{LOAD} and \texttt{DELETE}. Loading introduces executable
+content as a managed dependency; deletion must later respect the fact
+that other objects may still rely on that content.
+
+The oXiDe package transitions are:
+
+\begin{itemize}
+\item \textbf{absent to loaded}: caused by a complete and valid
+  \texttt{INSTALL [for load]} plus \texttt{LOAD} sequence. The temporary load
+  context is volatile until the final block has been checked; only the final
+  success creates the package registry entry.
+\item \textbf{loaded to locked}: caused by the beta's diagnostic
+  \texttt{SET STATUS} extension or kernel policy. A locked package remains
+  present but cannot be used by \texttt{INSTALL [for install]} to create a new
+  instance. GlobalPlatform itself defines no \texttt{LOCKED} Executable Load
+  File lifecycle state.
+\item \textbf{locked to loaded}: caused by the corresponding oXiDe diagnostic
+  unlock operation.
+\item \textbf{loaded or locked to absent}: caused by a simple \texttt{DELETE}
+  when no installed instance or dependent object still requires the load file,
+  or by cumulative deletion that explicitly includes the related objects.
+\end{itemize}
+
+This model deliberately keeps partially received code outside the stable
+registry. The registry must never advertise a load file as usable before the
+whole binary has been received and validated.
+
+%--------------------------------------------------
+\subsection{Security Domain Lifecycle}
+\label{sec:gp-lifecycle-domain}
+
+% Plan:
+% - explain that security domains also have lifecycle states
+% - stress their administrative role and privileged status
+% - distinguish them from ordinary applications without entering implementation
+
+Security Domains also have lifecycle states, but their meaning is more
+administrative than purely functional. A Security Domain is not only a
+selectable entity; it is also a carrier of privileges, keys, and
+management authority. As a result, its lifecycle constrains not only its
+own reachability but also which administrative operations may lawfully be
+performed under its authority.
+
+Three cases must be distinguished in oXiDe SE. The Root Security Domain is the
+non-deletable technical anchor and is outside ordinary Security Domain
+lifecycle transitions. When present, the Issuer Security Domain is the unique
+GlobalPlatform issuer endpoint and inherits the card lifecycle in the
+GlobalPlatform reference model. Supplementary and detached Security Domains
+are ordinary lifecycle-bearing administrative principals.
+
+In many operational environments, the Issuer Security Domain is also the
+administrative endpoint informally associated with the \emph{Card Manager}
+role. In strict GlobalPlatform terminology, however, \emph{Card Manager} is a
+broader historical label than \emph{Issuer Security Domain}. This document
+therefore keeps \emph{Issuer Security Domain} as the precise preferred term for
+the selected administrative endpoint with which an off-card management tool
+first establishes trust and through which it performs secure-element-management
+operations.
+
+For an ordinary Security Domain, the compact beta transitions are:
+
+\begin{itemize}
+\item \textbf{absent to selectable}: caused by the successful combined
+  install-and-make-selectable form of \texttt{INSTALL} when the instance is declared as a
+  Security Domain. The command fixes the Security Domain instance AID, backend
+  or package binding, initial administrative state, and base privilege bytes.
+  Once selectable, the Security Domain may be selected as an administrative
+  endpoint and may establish secure channels according to its key and profile
+  policy.
+\item \textbf{selectable to locked}: represented by the beta's restricted
+  \texttt{SET STATUS} transition or by platform policy. A locked Security
+  Domain remains a registry object, but it cannot be selected and cannot be
+  used to establish a secure channel. Because secure-channel establishment is
+  the entry point for protected management authority, this also prevents normal
+  administrative use under that Security Domain.
+\item \textbf{locked to selectable}: represented by the same restricted
+  unlock path.
+\item \textbf{selectable or locked to absent}: caused by simple
+  \texttt{DELETE} when no descendants or key dependencies remain, or by an
+  authorized cumulative deletion that includes the complete subordinate
+  closure.
+\end{itemize}
+
+The key difference from ordinary application lifecycle is that Security Domain
+state gates authority as well as selectability. A selectable application may
+process application APDUs; a selectable Security Domain may additionally
+authorize administrative operations, manage key material, and host secure
+channel state. A locked Security Domain therefore does not merely become
+unselectable: it also stops being a usable management authority.
+
+The lifecycle returned through the standard lifecycle data object
+\texttt{9F70} must reflect the effective state of the selected Security
+Domain. In oXiDe SE terms, this is the state stored with the Security Domain
+registry object or, for a Rustlet-backed Security Domain, the state reported by
+the selected Rustlet Security Domain through its dedicated management
+interface.
+
+The current \texttt{SET STATUS} decoder is not yet a conformant implementation
+of the GlobalPlatform state machine. GlobalPlatform uses P1 values to
+distinguish the Issuer Security Domain, Applications or supplementary Security
+Domains, and a Security Domain together with its associated Applications; P2
+contains the requested standard lifecycle value
+\gpref{gp-card}{§11.10}. The beta instead accepts an internal package category,
+maps its three categories directly to package, application, and Security
+Domain registry kinds, and accepts only compact lock/unlock controls. In
+particular it neither implements the Issuer/Card Life Cycle State nor the
+standard recursive Security-Domain-and-associated-Applications form. This path
+is diagnostic functionality pending protocol realignment.
+
+%--------------------------------------------------
+\subsection{Key Object State}
+\label{sec:gp-lifecycle-key}
+
+GlobalPlatform associates key material and key-management operations with a
+Security Domain, but it does not define the oXiDe key entries as ordinary
+GlobalPlatform Registry objects with a common lifecycle. oXiDe nevertheless
+stores typed key objects beneath their owning Security Domain. Their internal
+state is orthogonal to key version, key identifier, usage, and raw material and
+answers one operational question: may this key be used by secure-channel
+establishment?
+
+The current externally reachable behavior is:
+
+\begin{itemize}
+\item \textbf{absent to active}: caused by successful key provisioning, such
+  as \texttt{PUT KEY}. The key object becomes available to the corresponding
+  secure-channel profile.
+\item \textbf{active to active}: a later \texttt{PUT KEY} may replace the
+  matching owner-qualified key identity.
+\end{itemize}
+
+The registry representation also contains \texttt{Locked}, and secure-channel
+lookup correctly ignores a key in that state, but no conformant management APDU
+currently performs the Active/Locked transition. Generic deletion by the
+synthetic internal key-object AID is an implementation facility, not a
+GlobalPlatform key-removal interface. Key rotation does not require a separate
+lifecycle state. Moreover, a multi-key \texttt{PUT KEY} is presently applied
+and persisted entry by entry: complete key-set replacement is not atomic and a
+late parsing or storage failure may leave earlier entries updated. This is a
+beta limitation that must be removed before claiming complete
+\texttt{PUT KEY} interoperability.
+
+%--------------------------------------------------
+\section{Deployment Workflow}
+\label{sec:gp-deployment-workflow}
+
+% Plan:
+% - describe the canonical deployment flow at GP level
+% - keep it conceptual, not implementation-specific
+% - connect secure channel, load, install, personalization, and activation
+
+At a conceptual level, GlobalPlatform deployment is a staged workflow
+rather than a single command. A typical sequence is:
+
+\begin{enumerate}
+\item select the relevant Security Domain, typically the Issuer Security
+  Domain;
+\item establish the administrative authority and, when required, a
+  secure channel through \texttt{INITIALIZE UPDATE} and
+  \texttt{EXTERNAL AUTHENTICATE};
+\item prepare the secure element for receiving executable content;
+\item transfer that content through one or more \texttt{LOAD} commands;
+\item create or configure the installed instance through one of the
+  \texttt{INSTALL} variants;
+\item optionally personalize the instance;
+\item make it selectable or otherwise transition it to the intended
+  operational state.
+\end{enumerate}
+
+In oXiDe SE, a Rustlet normally follows this workflow after issuance: its FAE
+image is built independently, transferred to an already deployed secure
+element, and installed under the authority of a Security Domain. For a
+controlled initial image, oXiDe SE also supports pre-issuance deployment. The
+build configuration then embeds the Rustlet and declares its package and
+instance relationships in the predeployment manifest, so that they form part of
+the initial registry. Predeployment changes when the content enters the system;
+it does not turn the Rustlet into kernel code or bypass the managed-object,
+authority, lifecycle, and isolation models described in this chapter.
+
+\subsection{Bootstrap and the Initial Administrative Tree}
+
+A production-oriented oXiDe SE image normally pre-deploys at least two distinct
+administrative objects. The Root Security Domain establishes the technical
+root, initial registry authority, and recovery context. The unique Security
+Domain explicitly declared with \texttt{role = "issuer"}, when present, is a
+direct child of that root and is the normal entry point for subsequent
+card-content management. Other pre-deployed Security Domains are ordinarily
+placed below the Issuer hierarchy. A Security Domain attached directly to the
+oXiDe root is projected as the self-associated root of a detached
+GlobalPlatform hierarchy.
+
+This is one schema rather than a set of image profiles. A kernel-only image
+uses only the materialized technical root and kernel APDU modules. A
+Rustlet-development image declares a permissive root with no child Security
+Domain. A Security-Domain test image adds whatever hierarchy it exercises. A
+production-oriented hierarchy declares exactly one Issuer and the required
+protected policies. Zero Issuer declarations therefore means that no distinct
+Issuer exists; one identifies it; a second is rejected. The build validates
+parents, cycles, duplicate AIDs, and monotone privileges, then materializes the
+root, the optional Issuer, and the remaining domains in parent-before-child
+order independently of TOML declaration order.
+
+This bootstrap is part of the trusted initial image. Post-issuance management
+cannot manufacture a second parentless object, replace the oXiDe root, or
+change its lifecycle through the beta APDU surface. Dynamic extradition and
+detachment are not implemented; detached roots are currently established only
+by trusted predeployment.
+
+This workflow explains why the same command vocabulary is reused in
+different combinations. For example, \texttt{INSTALL} is not a single
+one-dimensional action: its mode flags let it participate in loading,
+installation, personalization, make-selectable, registry-update, or
+extradition workflows. The command set is therefore best read as a
+workflow language for secure-element administration.
+
+At this stage, two operational points are worth making explicit.
+
+First, management activity is usually embedded in an authenticated
+session. In a secure deployment, an operator is not expected to send
+\texttt{LOAD}, \texttt{INSTALL}, \texttt{PUT KEY}, or similar commands
+as isolated cleartext APDUs. The normal pattern is to select the
+administrative Security Domain, establish its configured Secure Channel---for
+example SCP03 or an SCP11 variant---and only then execute the management
+workflow.
+
+Second, personalization is conceptually part of deployment, but it is not
+the same thing as installation. Installation creates or configures the
+instance; personalization transfers instance-specific data. This is why a
+deployment sequence may remain incomplete, from the operational point of
+view, even after the executable content has been loaded and the
+application instance has been created.
+
+The beta profile implements the Rustlet load/install path needed by its test
+and development workflows, but not every GlobalPlatform personalization,
+extradition, Token, DAP, or Receipt form described by the reference workflow.
+Those omissions are implementation limits, not alternative definitions of the
+GlobalPlatform operations.
+
+\subsection{Hierarchy Removal and Cumulative Delete}
+
+Deletion is evaluated by the same authority-and-visibility rule as creation or
+update. A simple deletion removes one visible object only when doing so leaves
+no live dependency. Deleting a package with installed instances, or deleting a
+Security Domain that still owns objects or subordinate domains, must therefore
+fail in the simple form.
+
+Cumulative deletion changes the requested target set, not the authorization
+model. GlobalPlatform~2.3.1 defines hierarchy or sub-hierarchy cumulative
+deletion as an optional operation performed by a Security Domain with Global
+Delete privilege \gpref{gp-card}{§9.5.3--§9.5.4}. The oXiDe beta applies a
+narrower tree rule: an authority may request the cumulative form only over a
+target and closure already contained in its own visible subtree; transverse
+scope is obtained only by using the technical root.
+
+The implementation first computes the complete related-object closure:
+instances belonging to a package, or Security Domains and managed content in a
+subordinate hierarchy. Every member must remain within the active authority's
+visible subtree. The in-RAM entries are removed dependants first and the
+resulting registry is published in one persistent snapshot. Flash recovery can
+therefore retain the previous valid snapshot if publication is interrupted;
+this does not claim a general transaction mechanism for arbitrary mutations.
+
+The oXiDe root applies this same algorithm. Because every hierarchy is in its
+subtree, a root-requested cumulative deletion can remove any detached
+hierarchy and has card-wide effect. No variant of \texttt{DELETE}, including a
+cumulative form, may remove the oXiDe root itself. The beta does not implement
+GlobalPlatform's logically deleted Executable Load File state or the complete
+cross-hierarchy reference-repair behavior required by cumulative deletion.
+
+%--------------------------------------------------
+\section{Administration Model}
+\label{sec:gp-administration-model}
+
+% Plan:
+% - explain administrative authority in GP terms
+% - define the role of security domains and privileges
+% - distinguish management APDUs from ordinary application semantics
+
+GlobalPlatform administration is not defined as unrestricted access to a
+flat command set. It is defined through \textbf{authority} and
+\textbf{privileges}. Administrative actions are performed under the
+responsibility of a Security Domain, and the specification associates
+privileges with such entities to determine which operations they may
+perform \gpref{gp-card}{§7, §9.6, §11}.
+
+This explains why commands such as \texttt{PUT KEY}, \texttt{LOAD},
+\texttt{INSTALL}, \texttt{DELETE}, \texttt{SET STATUS}, or
+\texttt{GET STATUS} are not conceptually ordinary business commands.
+They belong to the administrative plane of the secure element. They operate on
+managed objects, on registry state, on keys, and on lifecycle
+transitions. Even when they are addressed in the context of a selected
+Security Domain, their semantics remain secure-element administration semantics.
+
+The privilege model is therefore the conceptual bridge between the object
+model and the command model. It explains why not every selected application
+may perform every administrative action, why secure channel establishment
+is tied to particular keys and domains, and why lifecycle changes are not
+purely local decisions of the addressed application instance.
+
+\subsection{Ordinary and Global Command Forms}
+
+In the GlobalPlatform reference model, \emph{Global Delete}, \emph{Global
+Lock}, and \emph{Global Registry} name privileges and their expanded effects;
+they are not separate DELETE, SET STATUS, or GET STATUS instruction bytes. A
+holder of the relevant global privilege may cross the association boundary
+that constrains an ordinary authority. Cumulative Delete is a distinct optional
+DELETE mode and is not synonymous with every use of Global Delete.
+
+oXiDe SE does not define a separate set of mutation primitives for card-wide
+administration. The internal operation is parameterized by a resolved Security
+Domain authority and is evaluated against that authority's visible subtree.
+At the APDU boundary the beta classifies DELETE, SET STATUS, and GET STATUS
+resolved to the technical root as internal ``global'' forms, then invokes the
+same deletion, status, or registry operation with \texttt{authority = root}.
+There is no additional on-wire opcode. Because the root's subtree contains
+every hierarchy, that invocation has card-wide effect.
+
+A subordinate Security Domain invokes the common operation over a smaller
+visible set. Stored Global Delete, Global Lock, or Global Registry bits do not
+expand that set in the beta. Consequently oXiDe's root-only transverse model is
+stricter than, and not fully interoperable with, the GlobalPlatform global
+privilege model. Neither root scope nor the internal classification bypasses
+dependency closure, lifecycle validation, persistence publication, or the
+Security Domain policy hook.
+
+This yields one audit rule: the result of an operation depends on the pair
+\emph{granted operation, visible target}. Global scope is the natural result
+of selecting the unique ancestor of all objects, not an alternative path
+around the reference monitor.
+
+%--------------------------------------------------
+\subsection{Management Commands versus Application Commands}
+\label{sec:gp-management-vs-application}
+
+% Plan:
+% - provide a user-visible distinction between GP administration and application use
+% - keep it conceptual and operational
+% - connect directly with selected context and SCP
+
+For practical use of the secure element, the most important distinction is
+between \textbf{management commands} and \textbf{application commands}.
+
+\begin{itemize}
+\item \textbf{Management commands} belong to the GlobalPlatform control
+  plane. They are used to establish a secure channel, inspect the
+  registry, load content, install instances, manage lifecycle states, and
+  manipulate key material. They are interpreted under the authority of a
+  selected Security Domain.
+\item \textbf{Application commands} belong to the business logic of a
+  selected application instance. They may use the same APDU transport, but
+  their semantics is external to GlobalPlatform secure-element administration.
+\end{itemize}
+
+This distinction is operationally essential. A security specialist who
+``uses the secure element'' typically alternates between two very
+different activities:
+
+\begin{enumerate}
+\item \textbf{administering the secure element}, by selecting a Security Domain and
+  using authenticated management commands;
+\item \textbf{using an application}, by selecting the target application
+  AID and sending the application-specific APDUs expected by that
+  instance.
+\end{enumerate}
+
+The same transport and the same \texttt{SELECT} mechanism are therefore
+shared by both planes, but the selected context determines which command
+space is actually meaningful.
+
+%--------------------------------------------------
+\subsection{Administrative Session Pattern}
+\label{sec:gp-admin-session-pattern}
+
+% Plan:
+% - give a concrete card-usage mental model to the reader
+% - summarize the minimal information needed by an operator
+% - avoid implementation details
+
+From an off-card operational perspective, a minimal administrative
+session usually requires the following information:
+
+\begin{itemize}
+\item the AID of the Security Domain to select;
+\item the SCP profile expected by the secure element, such as SCP03 or one of
+  the configured SCP11 variants;
+\item the relevant key version and static key set associated with that
+  Security Domain;
+\item the AIDs of the load file and application instance being managed;
+\item the privileges and lifecycle expectations attached to the target
+  objects.
+\end{itemize}
+
+With these elements, the usual administrative pattern is:
+
+\begin{enumerate}
+\item select the administrative Security Domain;
+\item establish the secure channel;
+\item perform the intended management workflow;
+\item optionally select the resulting application instance and switch to
+  application-level use.
+\end{enumerate}
+
+This pattern is simple, but it is central. It is the conceptual bridge
+between the APDU and SCP material of Chapter~3 and the more detailed
+object, lifecycle, and authority model presented in the present chapter.
+
+
+%--------------------------------------------------
+\section{Consistency and Constraints}
+\label{sec:gp-consistency}
+
+% Plan:
+% - state the main GP invariants
+% - connect them to object relationships and lifecycle model
+% - avoid implementation detail while making later design constraints explicit
+
+The GlobalPlatform model and the stricter oXiDe SE tree projection imply the
+following implementation requirements:
+
+\begin{itemize}
+\item a lifecycle transition must be valid for the addressed object type;
+\item a simple deletion cannot leave a live dependent object, while cumulative
+  deletion must compute and remove the complete authorized dependency closure;
+\item administrative commands must be evaluated under a Security Domain
+  that holds the relevant authority;
+\item registry updates, deployment steps, and personalization actions
+  must preserve a coherent secure-element view of identity, authority, and
+  dependency;
+\item exactly one oXiDe Root Security Domain has no parent, and it cannot be
+  deleted or replaced post-issuance;
+\item zero or one Security Domain is explicitly declared as Issuer; when
+  present it is a direct child of the root, and a second Issuer declaration is
+  rejected;
+\item every other managed object has one resolvable Security Domain parent;
+\item the parent relation is acyclic, child visibility is a subset of parent
+  visibility, and child rights are a subset of parent rights;
+\item sibling and detached hierarchies do not reveal objects to one another;
+\item a root-resolved DELETE, SET STATUS, or GET STATUS invokes the same
+  subtree operation and checks as a subordinate invocation, with the root AID
+  as authority;
+\item GlobalPlatform global privilege bits do not widen a non-root authority's
+  visible subtree in the beta; this is a documented profile restriction.
+\end{itemize}
+
+These rules should be understood as conceptual invariants before they are
+understood as implementation checks. They explain why some command
+sequences are legal and others are not, and they also explain why the
+reference implementation later needs explicit registry validation,
+privilege checking, and lifecycle guards.
+
+For a reader concerned with operational use, the same invariants can be
+read as a checklist of expected failure causes:
+\begin{itemize}
+\item wrong Security Domain selected;
+\item secure channel absent or established under the wrong authority;
+\item target object in an incompatible lifecycle state;
+\item dependency still present on a load file or application;
+\item insufficient privilege for the intended management action.
+\end{itemize}
+
+These are not implementation accidents. They are the normal conceptual
+reasons why a correctly encoded APDU may still be rejected by the secure
+element.
+
+%--------------------------------------------------
+\section{Beta Conformance Summary}
+
+The following table separates the oXiDe SE contract from the current beta
+claim. ``Implemented'' means that a corresponding code path and regression
+test exist; it is not a claim of formal verification.
+
+\begin{description}
+\item[Implemented.] The beta has one non-deletable parentless technical root;
+  subtree-filtered registry lookup; monotone child privileges; package and
+  instance dependency checks; cumulative removal of Security Domain
+  descendants and their owned content; explicit zero-or-one Issuer declaration;
+  parent-before-child predeployment; self-association projection for direct
+  root children; and root-authority reuse of the common DELETE, SET STATUS, and
+  GET STATUS operations. Unit and scenario tests cover these internal rules.
+\item[Configuration dependent.] A manifest with no \texttt{role = "issuer"}
+  has no distinct Issuer Security Domain. Exactly one such declaration creates
+  the Issuer below the root; more than one is rejected. Development manifests
+  may intentionally omit it, whereas a production-oriented GlobalPlatform
+  hierarchy normally includes it.
+\item[Partial.] The beta combines installation and selection; it uses a compact
+  Application/Security-Domain lifecycle projection; a non-standard package
+  lock state; a diagnostic, non-conformant subset of SET STATUS; root-only
+  transverse administration rather than the complete GlobalPlatform global
+  privilege semantics; and non-atomic multi-entry PUT KEY updates.
+\item[Incomplete.] Personalization, extradition, Tokens, DAPs, Receipts, and
+  the remaining GlobalPlatform workflow forms are not fully implemented. The
+  Card/Issuer lifecycle, standard key deletion/locking management, logically
+  deleted load files, and complete cumulative cross-hierarchy reference repair
+  are also absent.
+\item[Planned post-beta.] Logical channels must provide independent selection
+  and Secure Channel context per channel.
+\end{description}
+
+The distinction between standard global privileges and oXiDe's current
+root-only transverse scope is particularly important for evaluation. The
+registry correctly hides its technical containment edge in the GlobalPlatform
+association projection, but that projection does not by itself establish full
+interoperability with Security Domains that expect Global Delete, Global Lock,
+or Global Registry privileges to cross association hierarchies.
+
+%--------------------------------------------------
+\section{Discussion}
+
+% Plan:
+% - summarize chapter 4 as GP concepts only
+% - transition explicitly to chapter 5, which maps these concepts to our system decomposition
+
+This chapter has separated the GlobalPlatform association forest from the
+oXiDe SE implementation contract that embeds it below one technical root. The
+result is one uniform authorization model: a Security Domain performs granted
+operations over its visible subtree; the root is global because its subtree is
+the complete registry. The next chapter introduces the software decomposition
+that implements this contract, while later implementation and validation
+chapters assess which beta claims are supported by code and tests.
+
+%--------------------------------------------------

@@ -1,0 +1,343 @@
+# Kernel stack high-watermark baselines.
+# Update only through `cargo run test <name> --update_stack_baseline ...`.
+version = 2
+
+[[campaigns]]
+command = "gp_rustlet_security_domain_delegated_scp03"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 A4 04 00 #1"
+high_watermark = 2280
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 2320
+
+[[campaigns.checkpoints]]
+label = "APDU 84 82 01 00 #1"
+high_watermark = 5440
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #1"
+high_watermark = 5464
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #4"
+high_watermark = 5520
+
+[[campaigns]]
+command = "gp_rustlet_security_domain_scp03"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 A4 04 00 #1"
+high_watermark = 2280
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 2320
+
+[[campaigns.checkpoints]]
+label = "APDU 84 82 01 00 #1"
+high_watermark = 5456
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #1"
+high_watermark = 5464
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #4"
+high_watermark = 5520
+
+[[campaigns]]
+command = "gp_rustlet_security_domain_scp11a"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 A4 04 00 #1"
+high_watermark = 2280
+
+[[campaigns.checkpoints]]
+label = "APDU 80 82 00 02 #1"
+high_watermark = 5728
+
+[[campaigns]]
+command = "gp_rustlet_security_domain_scp11b"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 A4 04 00 #1"
+high_watermark = 2280
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #1"
+high_watermark = 5552
+
+[[campaigns]]
+command = "gp_rustlet_security_domain_scp11c"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 A4 04 00 #1"
+high_watermark = 2280
+
+[[campaigns.checkpoints]]
+label = "APDU 80 2A 00 00 #1"
+high_watermark = 2296
+
+[[campaigns.checkpoints]]
+label = "APDU 80 82 00 01 #2"
+high_watermark = 5648
+
+[[campaigns]]
+command = "gp_scp03"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+scenario = "all"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 1408
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 00 66 #1"
+high_watermark = 1512
+
+[[campaigns.checkpoints]]
+label = "APDU 80 50 00 00 #2"
+high_watermark = 1944
+
+[[campaigns.checkpoints]]
+label = "APDU 84 82 11 00 #1"
+high_watermark = 5496
+
+[[campaigns]]
+command = "gp_scp03"
+board = "raspi-pico1"
+image = "elf"
+execution_environment = "qemu"
+scenario = "all"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 1944
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 00 66 #1"
+high_watermark = 2004
+
+[[campaigns.checkpoints]]
+label = "APDU 80 50 7F 7F #1"
+high_watermark = 2152
+
+[[campaigns.checkpoints]]
+label = "APDU 80 50 00 00 #2"
+high_watermark = 2492
+
+[[campaigns.checkpoints]]
+label = "APDU 84 82 11 00 #1"
+high_watermark = 6108
+
+[[campaigns]]
+command = "gp_scp11a"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 1416
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 00 66 #1"
+high_watermark = 1520
+
+[[campaigns.checkpoints]]
+label = "APDU 80 2A 80 00 #1"
+high_watermark = 5920
+
+[[campaigns]]
+command = "gp_scp11b"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 2216
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #1"
+high_watermark = 5800
+
+[[campaigns]]
+command = "gp_scp11c"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 9F 70 #1"
+high_watermark = 1416
+
+[[campaigns.checkpoints]]
+label = "APDU 80 CA 00 66 #1"
+high_watermark = 1520
+
+[[campaigns.checkpoints]]
+label = "APDU 80 82 00 01 #2"
+high_watermark = 1944
+
+[[campaigns.checkpoints]]
+label = "APDU 80 2A 00 00 #1"
+high_watermark = 2088
+
+[[campaigns.checkpoints]]
+label = "APDU 80 2A 00 00 #2"
+high_watermark = 5640
+
+[[campaigns.checkpoints]]
+label = "APDU 80 82 00 01 #3"
+high_watermark = 5720
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #2"
+high_watermark = 5840
+
+[[campaigns.checkpoints]]
+label = "APDU 84 CA 9F 70 #3"
+high_watermark = 5920
+
+[[campaigns]]
+command = "kernel_ping"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 FE 00 00 #1"
+high_watermark = 496
+
+[[campaigns.checkpoints]]
+label = "APDU 80 FE 00 00 #5"
+high_watermark = 520
+
+[[campaigns.checkpoints]]
+label = "APDU 80 FE 00 00 #12"
+high_watermark = 544
+
+[[campaigns]]
+command = "kernel_ping"
+board = "raspi-pico2"
+image = "elf"
+execution_environment = "hardware"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 FE 00 00 #1"
+high_watermark = 1528
+
+[[campaigns]]
+command = "rustlet"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+scenario = "minimal_valid_test"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 E6 0C 00 #1"
+high_watermark = 3152
+
+[[campaigns]]
+command = "rustlet"
+board = "raspi-pico1"
+image = "elf"
+execution_environment = "qemu"
+scenario = "minimal_valid_test"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 80 E6 0C 00 #1"
+high_watermark = 3768
+
+[[campaigns]]
+command = "rustlet_all"
+board = "mps2-an385"
+image = "elf"
+execution_environment = "qemu"
+monitor_profile = "apdu-observer-v2"
+measured_commit = "68c4f32b4062"
+
+[[campaigns.checkpoints]]
+label = "APDU 00 00 00 00 #1"
+high_watermark = 1336
+
+[[campaigns.checkpoints]]
+label = "APDU 80 E6 0C 00 #1"
+high_watermark = 2888
+
+[[campaigns.checkpoints]]
+label = "APDU 00 82 00 00 #1"
+high_watermark = 3384
+
+[[campaigns.checkpoints]]
+label = "APDU 00 82 01 00 #1"
+high_watermark = 3416
+
+[[campaigns.checkpoints]]
+label = "APDU 00 84 01 00 #1"
+high_watermark = 3424
+
+[[campaigns.checkpoints]]
+label = "APDU 00 82 02 00 #1"
+high_watermark = 4240
+
+[[campaigns.checkpoints]]
+label = "APDU 00 82 02 00 #2"
+high_watermark = 4376
+
+[[campaigns.checkpoints]]
+label = "APDU 00 52 00 00 #1"
+high_watermark = 5496
+
+[[campaigns.checkpoints]]
+label = "APDU 00 52 00 00 #2"
+high_watermark = 6016

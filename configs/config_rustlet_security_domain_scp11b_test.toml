@@ -1,0 +1,18 @@
+[secure_channel]
+protocols = ["SCP11"]
+scp11_profiles = ["B"]
+
+[root.package]
+path = "./rustlets/complete_security_domain"
+aid = "A0:00:00:47:50:4F:53:06"
+
+[root.instance]
+aid = "A0:00:00:47:50:4F:53:04"
+install_bytes = "FF:FF:FF"
+
+[[root.packages]]
+path = "./rustlets/tests/minimal_valid_test"
+
+[[root.packages.instances]]
+aid = "A0:00:00:47:50:4F:53:16"
+install_bytes = ""

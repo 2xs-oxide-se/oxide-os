@@ -1,0 +1,6 @@
+[package]
+name = "rustlet_trampoline_return_test"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false

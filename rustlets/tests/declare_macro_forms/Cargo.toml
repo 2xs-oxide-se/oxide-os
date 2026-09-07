@@ -1,0 +1,21 @@
+[package]
+name = "rustlet_declare_macro_forms"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false
+
+[dependencies]
+rustlet_runtime = { path = "../../rustlet_runtime", features = ["runtime"] }
+
+[[bin]]
+name = "implicit_default_rustlet"
+path = "src/bin/implicit_default_rustlet.rs"
+
+[[bin]]
+name = "implicit_heap_rustlet"
+path = "src/bin/implicit_heap_rustlet.rs"
+
+[[bin]]
+name = "explicit_custom_install_rustlet"
+path = "src/bin/explicit_custom_install_rustlet.rs"

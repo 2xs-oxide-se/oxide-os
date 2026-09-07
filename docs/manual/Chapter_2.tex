@@ -1,0 +1,467 @@
+\chapter{Threat Model}
+
+This chapter defines the threat model used to assess oXiDe SE. It identifies
+the assets to protect, the capabilities of potential adversaries, the trust
+assumptions, and the attack surfaces. It then states the security objectives
+pursued by the architecture and maps them to the components described in
+Chapter~1. These objectives describe the intended effect of the design; they
+are not presented as formally established guarantees.
+
+%--------------------------------------------------
+\section{Attacker Panorama and Attack Surfaces}
+
+The attack surfaces considered in this chapter depend on where an adversary is
+positioned in the lifecycle introduced in Chapter~1. Different actors do not
+see the same interfaces, do not control the same privileges, and do not pursue
+the same objectives. The present threat model therefore distinguishes three
+main attack surfaces.
+
+\begin{itemize}
+\item \textbf{End-user side adversaries} interact with the secure element from
+  outside. Their typical objective is to steal secrets manipulated by service
+  providers or to undermine the integrity of those secrets and associated
+  services. From that position, the relevant attack surfaces are the external
+  APDU interface and, more broadly, the exposed hardware interface.
+\item \textbf{Service-provider side adversaries} already execute code or deploy
+  code in the secure element and try to violate the isolation expected by other
+  service providers. Their typical objective is to obtain secrets belonging to
+  competing services or to interfere with their execution. From that position,
+  the relevant attack surfaces are the kernel access interface and, where the
+  architecture allows it, any explicit service-sharing or inter-service
+  interface exposed to peer applications.
+\item \textbf{Hardware-origin adversaries} control or compromise an element
+  below the software stack, such as the silicon, boot substrate, or physical
+  board. Such an adversary could invalidate the execution and key-protection
+  assumptions on which every higher layer depends. This class includes a
+  malicious foundry, but is not modelled as an ordinary caller of the hardware
+  abstraction layer. Hardware and silicon compromise are declared out of scope
+  for the present software-architecture threat model.
+\end{itemize}
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[
+    stack/.style={
+      draw,
+      rounded corners=2pt,
+      minimum width=11.5cm,
+      minimum height=1.1cm,
+      align=center,
+      font=\small
+    },
+    sp/.style={
+      draw,
+      rounded corners=2pt,
+      minimum width=3.2cm,
+      minimum height=1cm,
+      align=center,
+      font=\small
+    },
+    label/.style={font=\small\itshape},
+    >=Latex
+  ]
+    \node[stack, fill=white] (user) at (0,4.8) {\textbf{End User}};
+
+    \node[sp, fill=gray!10] (sp1) at (-4.1,3.2) {\textbf{Service}\\\textbf{Provider A}};
+    \node[sp, fill=gray!10] (sp2) at (0,3.2) {\textbf{Service}\\\textbf{Provider B}};
+    \node[sp, fill=gray!10] (sp3) at (4.1,3.2) {\textbf{Service}\\\textbf{Provider C}};
+
+    \draw[dashed] (-2.05,2.65) -- (-2.05,3.75);
+    \draw[dashed] (2.05,2.65) -- (2.05,3.75);
+
+    \draw[thick] (-6.0,1.6) -- (6.0,1.6);
+    \node[label, anchor=west] at (-5.9,1.85) {unsafe world};
+    \node[label, anchor=west] at (-5.9,1.25) {root of security};
+
+    \node[stack, fill=gray!25] (issuer) at (0,0.0) {\textbf{Issuers}};
+    \node[stack, fill=gray!70, text=white] (provider) at (0, -1.6) {\textbf{Providers}};
+    \node[stack, fill=black, text=white] (foundry) at (0,-3.2) {\textbf{Foundries}};
+
+    \draw[->, thick] (user.south) -- (0,3.75);
+    \draw[->, thick] (sp2.south) -- (issuer.north);
+    \draw[->, thick] (issuer.south) -- (provider.north);
+    \draw[->, thick] (provider.south) -- (foundry.north);
+  \end{tikzpicture}
+  \caption{Trust stack around a secure element, from foundries up to end-user-facing services.}
+  \label{fig:trust-stack-actors}
+\end{figure}
+
+This decomposition clarifies the reading of the rest of the chapter. The
+external communication path is studied primarily because it is the current
+entry point of the prototype and therefore the first concrete attack surface.
+The kernel-facing and inter-service surfaces are equally important for the
+target architecture, because the long-term goal is to host mutually isolated
+Rustlets or applications that may originate from distinct and potentially
+hostile service providers.
+
+Not every actor category defined in Chapter~1 appears as an attacker category
+here. Providers and issuers remain relevant for trust assumptions and
+administrative authority, but the present chapter focuses on the interfaces
+through which end users, service providers and hardware-origin adversaries can
+actually attack the platform.
+
+Figure~\ref{fig:trust-stack-actors} summarizes the actors involved in that trust
+stack, but the position of an organization in the lifecycle does not by itself
+make all of its software trusted. End users and service providers consume the
+security properties sought by the platform. Issuers, image integrators,
+provisioning authorities, toolchain operators, and hardware providers form the
+pre-issuance chain of trust to the extent that they can alter or approve the
+initial image and its trust anchors. The service-provider layer is intentionally
+shown as multiple parallel boxes because the target architecture must support
+coexistence of mutually isolated service-provider payloads within one secure
+element, whereas the end-user layer is represented by a single box because one
+deployed secure element is operated in one end-user context at a time.
+
+An ordinary Rustlet remains outside the runtime TCB whether it is loaded before
+or after issuance. Its developer does not become a trusted authority merely
+because that Rustlet is pre-deployed. The authority that selects the Rustlet,
+approves its inclusion, and produces the issued image is, however, part of the
+pre-issuance chain of trust. Privileged kernel-resident modules and Security
+Domain authorization logic have the more specific TCB status defined in
+Chapter~1.
+
+%--------------------------------------------------
+\section{Scope and Assets}
+
+This section defines the assets that must be protected by the platform. These
+assets correspond to both data and control structures that are critical to the
+security and integrity of the system.
+
+\begin{itemize}
+\item Integrity of the application lifecycle
+\item Confidentiality and integrity of cryptographic keys
+\item Isolation between applications
+\item Integrity of the internal registry
+\item Control over administrative channels
+\end{itemize}
+
+Across the three attack surfaces introduced above, these assets are exposed in
+different ways: APDU-facing adversaries target command authorization and data
+confidentiality, service-provider-facing adversaries target isolation and
+kernel mediation, and hardware-origin adversaries would ultimately target the
+root secrets on which all higher layers depend.
+
+The integrity of the application lifecycle is the objective that operations
+such as LOAD, INSTALL and DELETE must not be performed in an unauthorized or
+inconsistent manner. Attacks targeting lifecycle management
+have been demonstrated in smart card environments where logical flaws allow
+inconsistent states or unauthorized installation flows
+\cite{mostowski2008malicious, barbu2010javacard}.
+
+The confidentiality and integrity objective for cryptographic keys requires
+that sensitive material used for secure channels or internal services be
+accessible and modifiable only through authorized interfaces. Numerous works
+on Trusted Execution Environments and secure elements
+highlight practical key extraction or misuse vulnerabilities when isolation or
+API design is flawed \cite{shakevsky2022keymaster, busch2020trustedcore}.
+
+Isolation between applications is intended to prevent one application from
+interfering with or observing the execution of another. Violations of such
+isolation have been widely studied in both Java Card and TEE contexts
+\cite{mostowski2008malicious, cerdeira2022rezone}.
+
+The integrity objective for the internal registry requires identifiers, states,
+and privileges associated with applications and domains to remain consistent
+and modifiable only through kernel-mediated transitions. Corruption or
+manipulation of such metadata can lead to privilege
+escalation or inconsistent system states, as observed in several TEE
+vulnerability analyses \cite{munoz2023tee}.
+
+Control over administrative channels is intended to ensure that only an entity
+holding the required credentials and authority can cause management commands to
+take effect. Replay, impersonation, message modification, and relay are distinct
+communication threats: authentication and freshness can address the first
+three, whereas a transparent real-time relay requires additional proximity or
+channel-binding mechanisms that are not currently provided by oXiDe SE
+\cite{roland2012relay, francis2011relay}.
+
+General service availability is not treated as a separate asset in this model.
+APDU processing is sequential, command buffers are bounded, and Rustlets use
+statically constrained volatile resources, so an application cannot accumulate
+unbounded APDUs or RAM allocations. Persistent storage has a narrower progress
+objective: journal updates should preserve a previous valid state, and a
+Rustlet whose serialized state remains within its assigned capacity should
+remain rewritable. A genuine increase beyond that capacity may legitimately
+return an out-of-memory error. Chapter~6 describes the persistence mechanism
+against which this objective is assessed.
+
+%--------------------------------------------------
+\section{Adversary Model}
+
+This section describes the capabilities of potential adversaries interacting
+with the platform.
+
+\begin{itemize}
+\item External adversary with communication access
+\item Malicious internal application
+\item Compromised administrator
+\end{itemize}
+
+These adversary classes map directly onto the lifecycle-based panorama. The
+external adversary corresponds to the end-user side attack surface. The
+malicious internal application corresponds to the service-provider side attack
+surface once independently deployed services are considered. The compromised
+administrator overlaps with issuer- or provider-level operational authority and
+therefore informs the privilege and trust boundaries around lifecycle
+management.
+
+The external adversary with communication access is able to send arbitrary APDU
+commands to the platform and observe responses. This includes the ability to
+inject malformed or malicious command sequences, attempt replay of previously
+observed exchanges, or interact with the system through a man-in-the-middle
+position on the communication channel. Such capabilities are illustrated by
+relay and communication-layer attacks against secure elements and contactless
+systems \cite{roland2012relay, francis2011relay, zhao2021sim}.
+
+The malicious internal application corresponds to an application that has been
+successfully installed but behaves in a hostile manner. Such an application may
+attempt to escalate its privileges, access resources belonging to other
+applications, or violate secure-storage boundaries, in particular by targeting
+key management mechanisms or sensitive persistent data. These behaviors are
+well documented in Java Card and TEE environments \cite{mostowski2008malicious,
+barbu2010javacard, lanet2012handson, bouffard2012nightmare, bouffard2015cft,
+busch2020trustedcore}.
+
+The compromised administrator represents an entity that legitimately holds
+administrative privileges but uses them in a malicious or unintended way. Its
+capabilities depend on which authority is compromised. A supplementary
+Security Domain may misuse the powers delegated over its own administrative
+subtree; the kernel is intended to prevent it from escaping that subtree or
+bypassing platform-wide invariants. Compromise of the issuer, image-production
+authority, or configured root authority has a substantially larger impact and
+may invalidate the initial policy itself. The model therefore does not treat
+``administrator'' as one uniform privilege level. Similar threat patterns are
+studied in TEE privilege models and their misuse
+\cite{cerdeira2022rezone, munoz2023tee}.
+
+%--------------------------------------------------
+\section{Trust Assumptions}
+
+This section states the assumptions required for the architecture to pursue its
+security objectives.
+
+\begin{itemize}
+\item Trusted root of execution
+\item Correct implementation of cryptographic primitives
+\item Secure key storage
+\item Integrity of the runtime environment
+\end{itemize}
+
+The trusted root of execution assumes that the initial boot process and trusted
+code base cannot be altered by an adversary. The runtime TCB is the one defined
+in Chapter~1: the target execution substrate, kernel, privileged kernel-resident
+modules, relevant Security Domain authorization logic, trust anchors, and
+security configuration. This assumption is common in secure element and TEE
+architectures.
+
+Before issuance, the compiler, image-construction tools, provisioning process,
+image-approval authorities, and hardware supply chain must also behave as
+expected. They are dependencies of the initial trusted image rather than
+resident components of its runtime TCB. Ordinary Rustlets and their developers
+remain outside that TCB, including when an integration authority chooses to
+pre-deploy such a Rustlet.
+
+The correct implementation of cryptographic primitives assumes that algorithms
+such as AES or MAC computations are implemented without flaws and behave as
+expected. However, numerous works have shown that even correct algorithms can
+leak information through side channels \cite{kocher1996timing, kocher1999dpa}.
+
+Secure key storage assumes that cryptographic material cannot be extracted or
+modified outside of authorized interfaces. Violations of this assumption have
+been demonstrated in practice in TEE implementations \cite{bouffard2014reverse,
+shakevsky2022keymaster}.
+
+The integrity of the runtime environment assumes that the execution context
+enforces isolation and prevents arbitrary code execution outside controlled
+mechanisms.  Attacks breaking such assumptions have been demonstrated through
+both fault-assisted techniques, which enable control-flow deviation or type
+confusion in smart card environments \cite{dubreuil2012fault,
+razafindralambo2012virus}, and logical vulnerabilities in Trusted Execution
+Environments, allowing privilege escalation or interface abuse
+\cite{busch2024globalconfusion}.
+
+%--------------------------------------------------
+\section{Attack Surfaces}
+
+This section identifies the main interfaces through which an adversary may interact with the system.
+
+\begin{itemize}
+\item APDU communication interface
+\item Secure channel protocol
+\item Administrative command set
+\item Inter-application invocation mechanisms
+\item Internal registry and persistence layer
+\end{itemize}
+
+These interfaces refine the three attack surfaces of Section~2.1. The APDU
+communication interface and the secure channel protocol belong to the end-user
+side entry points. The administrative command set, inter-application
+invocation mechanisms, and registry-facing operations become especially
+relevant on the service-provider side, where a hostile deployed component may
+try to cross the kernel boundary or abuse an explicit sharing interface.
+
+On the RP2350, the current Pico~2 port starts oXiDe SE in the processor's Secure
+state, but it does not yet configure a complete Secure/Non-secure TrustZone
+partition or expose the final virtual-Secure-Element interface. Completing that
+integration is planned for the beta~1 development cycle. In that future
+configuration, the Non-secure world and its operating system must be treated as
+potentially hostile, and every Secure-world entry point becomes an additional
+external attack surface.
+
+The APDU communication interface is the primary entry point and therefore the
+main attack surface, as all external commands are received through this
+interface. Communication-level attacks such as relay or replay attacks directly
+target this interface \cite{roland2012relay}.
+
+The secure channel protocol represents a critical surface where errors in
+authentication, key derivation or message protection could compromise the
+entire system. Weaknesses in secure channel implementations have historically
+led to severe compromises.
+
+The administrative command set includes operations such as INSTALL, LOAD or
+DELETE, which directly impact the system state and must be strictly controlled.
+Logical attacks exploiting these commands have been demonstrated in smart card
+environments \cite{barbu2010javacard, lanet2012handson}.
+
+Where explicit inter-application invocation mechanisms are provided, they allow
+applications to interact and may be exploited if isolation or access control is
+insufficient. They are therefore a target-architecture surface, not a claim
+that every current image exposes such an interface. Such weaknesses are well
+documented in both Java Card and TEE contexts
+\cite{mostowski2008malicious, cerdeira2022rezone}.
+
+The internal registry and persistence layer store critical metadata and
+represent a target for tampering or corruption attacks, which can lead to
+persistent privilege escalation \cite{munoz2023tee}.
+
+%--------------------------------------------------
+\section{Security Goals}
+
+This section defines the security properties that the architecture is designed
+to enforce. Their implementation and validation evidence are examined in later
+chapters; no formal proof is implied here.
+
+\begin{itemize}
+\item Authenticity
+\item Integrity
+\item Confidentiality
+\item Isolation
+\item Non-bypassability
+\end{itemize}
+
+Authenticity aims to ensure that only entities holding the required credentials
+can issue protected administrative or operational commands. It mitigates
+impersonation, but does not by itself establish physical proximity or prevent a
+transparent real-time relay \cite{roland2012relay}.
+
+Integrity aims to make modifications of system state and application code
+possible only through authorized transitions. It addresses logical
+modification attempts within the stated model; physical fault injection remains
+out of scope \cite{boneh1997faults}.
+
+Confidentiality aims to protect sensitive data, in particular cryptographic
+keys and secure-storage contents, against unauthorized logical access.
+Side-channel attacks remain out of scope \cite{kocher1999dpa}.
+
+Isolation aims to make applications operate independently and to contain a
+malicious or defective Rustlet within its mediated resources, a key requirement
+highlighted in multiple Java Card and TEE attacks
+\cite{mostowski2008malicious}.
+
+Non-bypassability is the objective that privileged effects remain mediated by
+the kernel and cannot circumvent the security model, a property often violated
+in real-world TEE vulnerabilities \cite{cerdeira2022rezone}.
+
+%--------------------------------------------------
+\section{Mitigations and Architectural Mapping}
+
+This section relates the identified threats to the architectural components
+previously described.
+
+\begin{itemize}
+\item Secure channel protocol
+\item Privilege model
+\item Security Domains
+\item Registry consistency mechanisms
+\item Runtime isolation
+\end{itemize}
+
+The mapping is intentionally surface-oriented: secure messaging protects the
+external APDU-facing boundary, Security Domains express administrative and
+cryptographic authority, the kernel privilege model mediates privileged
+effects, and registry consistency plus runtime isolation limit the impact of a
+hostile component once code has been deployed inside the platform.
+
+Depending on its mode, the secure channel protocol provides peer authentication,
+message integrity, confidentiality, and stateful replay protection for APDU
+exchanges. These properties can prevent an unauthenticated endpoint from
+modifying or impersonating a protected session, but do not prevent a transparent
+real-time relay without an additional proximity or channel-binding mechanism
+\cite{roland2012relay}.
+
+The privilege model is intended to restrict administrative operations to the
+authority assigned to the active administrative context, addressing privilege
+escalation threats observed in malicious application scenarios
+\cite{mostowski2008malicious}.
+
+Security Domains express the delegation of administrative and cryptographic
+authority over application subtrees. They do not themselves enforce memory or
+execution isolation: those boundaries are provided by the kernel and, where
+available, the processor protection mechanisms.
+
+Registry consistency mechanisms are designed to validate state transitions and
+preserve a recoverable valid state when committing persistent changes, thereby
+mitigating attacks and failures targeting internal metadata
+\cite{munoz2023tee}.
+
+Runtime isolation is intended to prevent applications from accessing or
+interfering with each other's execution or data, a critical defense against
+malicious applications \cite{busch2020trustedcore}.
+
+%--------------------------------------------------
+\section{Out-of-Scope Considerations}
+
+This section explicitly defines what is not covered by the threat model.
+
+\begin{itemize}
+\item Physical attacks
+\item Side-channel attacks
+\item Hardware compromise
+\item Correctness of an application's own behaviour
+\item Security claims for QEMU-oriented builds
+\end{itemize}
+
+The out-of-scope boundary is particularly important for the hardware-origin
+attack surface introduced in Section~2.1: hardware compromise and lower-level
+silicon-origin attacks are explicitly excluded from the present chapter because
+they could invalidate the confidentiality and integrity properties sought by
+service providers.
+
+Physical attacks, such as fault injection or probing, are not considered in
+this model, although they are well studied in the literature
+\cite{boneh1997faults}.
+
+Side-channel attacks, including timing or power analysis, are also excluded,
+despite their practical impact \cite{kocher1996timing, kocher1999dpa}.
+
+Hardware compromise falls outside the scope of this architecture-level model.
+
+Application-level correctness is not an assumption made by this threat model:
+an ordinary Rustlet may be defective or malicious. Protecting that Rustlet's
+own assets from its own implementation bugs is out of scope, while containing
+their effects on other applications and on kernel-owned state is a platform
+security objective. The same distinction applies to a pre-deployed ordinary
+Rustlet; pre-issuance placement does not turn its developer into a trusted
+platform authority.
+
+No deployment-security claim is made for QEMU-oriented builds. They are
+retained as development and validation tools, not as secure deployment targets.
+This is particularly important because the project
+uses semihosting during bring-up and debugging, and semihosting explicitly
+introduces a host-assisted escape hatch that breaks the isolation assumptions
+expected from a secure element style environment \cite{qemu-security,
+qemu-semihosting}. The threat model therefore applies to intended hardware
+deployments, not to the convenience execution environments used during
+prototype development.
+
+%--------------------------------------------------

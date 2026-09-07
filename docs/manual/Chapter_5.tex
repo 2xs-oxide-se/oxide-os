@@ -1,0 +1,510 @@
+\chapter{System Decomposition and Execution Model}
+
+This chapter explains how the project maps the GlobalPlatform concepts
+introduced in Chapter~4 onto an explicit software decomposition. In
+other words, the previous chapter described \emph{what} GlobalPlatform
+manages; this chapter describes \emph{how} the present system chooses to
+organize that management internally.
+
+%--------------------------------------------------
+\section{Reading Chapter 4 as a Software Architecture}
+
+% Plan:
+% - explain that chapter 4 was conceptual, while chapter 5 is the chosen mapping
+% - state explicitly that GP does not force a unique internal decomposition
+% - introduce the guiding implementation idea
+
+Chapter~4 distinguished three major conceptual roles:
+\begin{itemize}
+\item managed objects such as load files and installed applications;
+\item administrative principals, namely Security Domains;
+\item a command-dispatch context determined by selection and by the
+  active communication state.
+\end{itemize}
+
+GlobalPlatform does not require one unique internal implementation of
+those roles. The present project adopts a deliberately explicit reading:
+the small set of truly platform-global commands is handled directly by a
+kernel layer, while most other APDUs are dispatched to the currently
+selected application. In that model, Security Domains are not reduced
+to hard-coded special cases in every branch of the kernel. They are
+modeled as applications resident on the secure element with elevated authority and access to
+privileged services.
+
+This choice is meant to preserve two useful properties:
+\begin{itemize}
+\item APDU dispatch stays uniform: after selection, commands are routed
+  to an AID-associated entity through a common path;
+\item authority remains explicit: only entities with the right
+  privileges may invoke sensitive kernel services.
+\end{itemize}
+
+At the same time, this chapter must be read against Chapter~2. The
+chosen decomposition is not judged only by elegance or modularity. It is
+judged by whether it helps protect the assets and mitigate the threats
+identified in the threat model:
+\begin{itemize}
+\item integrity of the application lifecycle;
+\item confidentiality and integrity of cryptographic keys;
+\item isolation between applications;
+\item integrity of the internal registry;
+\item control over administrative channels;
+\item resistance to malicious internal applications;
+\item non-bypassability of privileged operations.
+\end{itemize}
+
+The rest of the chapter therefore treats the software decomposition as a
+security architecture, not merely as an implementation convenience.
+
+%--------------------------------------------------
+\section{Layered Decomposition}
+\label{sec:system-layering}
+
+% Plan:
+% - present the security-relevant 3-layer view
+% - mention core as supporting substrate
+% - make clear that this is a software decomposition, not a GP normative statement
+
+For the present project, the security-relevant execution stack is best
+understood as a \textbf{three-layer architecture} resting on a reusable
+runtime substrate.
+
+At the bottom sits \textbf{core}, the reusable support layer. It
+provides bootstrapping, target dispatch, serial transport, semihosting,
+flash, cryptographic primitives, and similar low-level services. This
+layer is essential to the implementation, but it is not by itself the
+main authority boundary discussed in this chapter.
+
+Above that substrate, the architecture of interest is:
+
+\begin{itemize}
+\item \textbf{kernel}: the platform core that owns secure-element-wide control
+  flow, selection, privileged resource mediation, and the security
+  boundary against applications;
+\item \textbf{GP administrative applications}: first-class applications
+  resident on the secure element, chiefly Security Domains, that implement administrative
+  semantics but rely on privileged kernel services for sensitive effects;
+\item \textbf{ordinary applications}: non-administrative application
+  instances, typically loaded after issuance, which provide business
+  logic but do not own management authority.
+\end{itemize}
+
+This decomposition should be read as an implementation architecture, not
+as a claim that the GlobalPlatform specification itself mandates those
+exact software layers. Its purpose is to realize the conceptual
+distinctions of Chapter~4 while making the authority and isolation
+boundaries analyzable from a security point of view.
+
+The reason for making the three layers explicit is simple:
+\begin{itemize}
+\item the kernel must protect global assets and enforce non-bypassable
+  mediation;
+\item GP administrative applications must be powerful enough to express
+  secure-element-management logic;
+\item ordinary applications must remain strongly constrained so that a
+  malicious ordinary application cannot compromise the rest of the
+  platform.
+\end{itemize}
+
+%--------------------------------------------------
+\section{Kernel Responsibilities}
+\label{sec:system-kernel-responsibilities}
+
+% Plan:
+% - explain what stays in the kernel
+% - emphasize OPEN-level handling and platform-global state
+% - distinguish this from GP command semantics executed by security domains
+
+In the present design, the kernel is intentionally small in semantic
+scope. Its primary responsibilities are:
+
+\begin{itemize}
+\item boot and runtime entry;
+\item transport-level APDU handling and selected-context maintenance;
+\item direct handling of the small set of platform-global commands that
+  must preempt ordinary dispatch;
+\item enforcement of privileged operations that should not be performed
+  by arbitrary applications;
+\item ownership of platform-global resources such as registry storage,
+  persistent management state, and protected cryptographic material.
+\end{itemize}
+
+At the APDU level, this means that the kernel directly handles the
+\texttt{OPEN}-like part of the communication model. At the current stage
+of the project, this is mainly \texttt{SELECT}; later it may include
+\texttt{MANAGE CHANNEL} if logical channels are implemented. The
+important point is that these commands affect the communication context
+itself and therefore cannot simply be treated as ordinary APDUs routed to
+the currently selected application.
+
+Everything beyond that small preemptive surface is intended to follow the
+normal selected-application dispatch path.
+
+From a security perspective, the kernel is also where several Chapter~2
+requirements become concrete:
+\begin{itemize}
+\item \textbf{non-bypassability}: all privileged effects must cross a
+  kernel-controlled boundary;
+\item \textbf{registry integrity}: authoritative updates to identity,
+  privilege, lifecycle, and dependency state belong to kernel-protected
+  code and data;
+\item \textbf{control over administrative channels}: context-defining
+  commands and secure-channel state must not be forgeable by ordinary
+  applications;
+\item \textbf{runtime integrity}: applications must not gain arbitrary
+  code-execution power inside the kernel.
+\end{itemize}
+
+This is why the kernel is intentionally kept small in semantic scope. A
+smaller kernel surface is easier to reason about for integrity and
+non-bypassability than a monolithic design in which every management
+command is implemented directly in the privileged core.
+
+%--------------------------------------------------
+\section{Administrative Applications and Security Domains}
+\label{sec:system-admin-apps}
+
+% Plan:
+% - explain security domains as preinstalled privileged applications
+% - connect to chapter 4 administration model
+% - explain why GP commands can be handled there without making kernel huge
+
+Chapter~4 explained that Security Domains are the administrative
+principals of GlobalPlatform. In the present system decomposition, they
+are realized as \textbf{administrative application-like objects}. They are
+selected through AIDs like other resident entities on the secure element, carry
+their own state, keys, privileges, and secure-channel context, and may be backed
+either by kernel code or by an isolated Rustlet.
+
+Oxide SE deliberately keeps the management hook on the kernel side. The kernel
+recognizes the GlobalPlatform management commands that mutate platform state:
+registry updates, lifecycle transitions, key installation, controlled content
+loading, deletion, and secure-channel establishment. The active Security Domain
+does not edit the registry directly. Instead, it authorizes or refuses the
+operation, supplies the policy and cryptographic context, and may refine that
+decision through its backend implementation.
+
+This is the point where Oxide SE differs from a more Java Card-like
+implementation strategy. A Java Card implementation may make the selected
+Security Domain look like the functional APDU endpoint for many management
+commands, with internal system services performing the protected effects behind
+that endpoint. Oxide SE keeps the same visible administrative model, but uses a
+symmetric internal decomposition: the kernel owns parsing, registry mutation,
+non-escalation checks, and atomicity; the Security Domain owns authority,
+policy, secure-channel material, and the decision to authorize management
+families.
+
+This point deserves to be stated strongly: in this design, a Security
+Domain is not treated as a fake application or as a mere label attached to
+kernel code. It is treated as a \textbf{first-class application-like object}.
+It has an AID, may be selected, carries administrative state, and owns
+privileges and key material associated with its role. In other words, the
+project takes seriously the idea from Chapter~4 that a Security Domain is
+simultaneously:
+\begin{itemize}
+\item an addressable entity resident on the secure element;
+\item an administrative principal;
+\item a holder of management authority and cryptographic trust anchors.
+\end{itemize}
+
+The security consequence is subtle but important. Because Security Domains may
+be backed by isolated Rustlets in this architectural sense, they must also be
+considered under the same isolation discipline as other application code. They
+are more privileged, but they are not thereby exempt from needing a clear
+boundary with the kernel and with peer applications.
+
+This directly addresses two threats from Chapter~2:
+\begin{itemize}
+\item a \textbf{malicious internal application} must not be able to
+  impersonate a Security Domain merely by reproducing an APDU surface;
+\item a \textbf{compromised administrative application} must not obtain
+  unlimited power beyond the privileges and kernel services explicitly
+  granted to it.
+\end{itemize}
+
+The design aim is therefore not ``Security Domains are trusted, ordinary
+applications are untrusted.'' The stronger and more useful statement is:
+all application-level code is isolated; some selected entities are granted
+administrative privileges, but those privileges remain bounded, mediated by the
+kernel, and analyzable as Security-Domain authority rather than as raw access to
+the registry.
+
+%--------------------------------------------------
+\section{Ordinary Applications}
+\label{sec:system-ordinary-apps}
+
+% Plan:
+% - describe ordinary apps as selected entities without kernel privileges
+% - distinguish application APDUs from GP administrative commands
+% - prepare future loadable FAE model
+
+Ordinary applications are the selected applications that implement business
+logic rather than secure-element administration. Once selected, they receive APDUs
+through the same general dispatch path as any other application-like
+entity, but they do not own privileged management authority.
+
+This distinction is what separates a true administrative Security Domain
+from an ordinary application that merely imitates some of its APDU
+surface. An ordinary application may expose commands that resemble
+administrative ones, but without privileged kernel services it cannot
+actually perform protected operations such as installing content,
+changing lifecycle states, or replacing platform keys.
+
+This is also the model that naturally extends to future loadable Rust
+applications. They may be selected and invoked through APDUs, but their
+rights remain subject to the authority structure imposed by the
+administrative applications and enforced by the kernel.
+
+This layer is where the \textbf{malicious internal application} threat of
+Chapter~2 becomes central. An ordinary application must be assumed
+capable of:
+\begin{itemize}
+\item sending malformed requests through any allowed inter-application or
+  service interface;
+\item attempting to read, corrupt, or confuse data belonging to other
+  applications;
+\item imitating management-level command formats in order to probe the
+  authority boundary;
+\item exploiting lifecycle, registry, or service-call mistakes to gain
+  stronger rights than intended.
+\end{itemize}
+
+The architecture of this chapter is acceptable only if it helps contain
+such a component. In particular, an ordinary application must not be able
+to:
+\begin{itemize}
+\item alter registry state directly;
+\item install or delete content directly;
+\item manipulate platform key material directly;
+\item forge the existence of a secure administrative session;
+\item interfere with the selection state, memory, or persistent data of
+  another application outside the explicitly allowed sharing mechanisms.
+\end{itemize}
+
+%--------------------------------------------------
+\section{Selection and Dispatch Semantics}
+\label{sec:system-selection-dispatch}
+
+% Plan:
+% - explain exact dispatch rule: SELECT preempts, rest goes to selected AID
+% - make link with GP OPEN and selected-application semantics
+% - explain GET RESPONSE stays transport-local and not a business dispatch decision
+
+The dispatch rule adopted by the project is intentionally simple.
+
+\begin{itemize}
+\item \texttt{SELECT} preempts ordinary dispatch because it changes the
+  selected context itself;
+\item other future \texttt{OPEN}-level commands, such as
+  \texttt{MANAGE CHANNEL}, belong to the same preemptive family if they
+  are implemented;
+\item every other business command is routed to the code associated with
+  the currently selected application.
+\end{itemize}
+
+This means that a Security Domain and an ordinary application are, at the
+dispatch level, treated in the same structural way: both are selected
+entities addressed by APDUs after the context-setting phase. The
+difference lies in what they are then allowed to do.
+
+This is one of the most useful architectural simplifications of the
+design. The routing rule remains uniform, but the authority rule does
+not. The dispatch decision answers \emph{who receives the APDU}; the
+security model separately answers \emph{what that receiver is allowed to
+cause inside the platform}. Keeping these two questions distinct helps
+avoid a common design pitfall in which routing shortcuts silently become
+privilege shortcuts.
+
+The transport exceptions described in Chapter~8 remain orthogonal to this
+business dispatch rule. For instance, \texttt{GET RESPONSE} is handled by
+the transport loop because it belongs to the \texttt{T=0} realization of
+the exchange rather than to the business semantics of the selected
+application.
+
+From the point of view of Chapter~2, this section is where the security
+goal of \textbf{control over administrative channels} meets the execution
+model. The selected context must be explicit, coherent, and protected
+against spoofing or unintended reuse. Otherwise, an attacker could move
+from malformed APDU traffic to actual misbinding of management authority.
+
+%--------------------------------------------------
+\section{Privileged Services and Authority Boundaries}
+\label{sec:system-authority-boundaries}
+
+% Plan:
+% - explain why kernel services must mediate sensitive actions
+% - explain capability idea without over-specifying syscall ABI
+% - tie back to chapter 4 privileges and administrative model
+
+The authority model of Chapter~4 reappears here as a kernel-service
+boundary. Sensitive state changes are not performed merely because an
+application emitted an APDU handler branch claiming to be administrative.
+They are performed only when the selected application is recognized as holding
+the corresponding authority and when it invokes the privileged kernel
+operation that implements the requested effect.
+
+This allows a clean separation between:
+
+\begin{itemize}
+\item \textbf{APDU semantics}, which may be expressed in the code of an
+  administrative application;
+\item \textbf{effective authority}, which remains enforced by the kernel.
+\end{itemize}
+
+The future syscall or service boundary of the project should therefore be
+understood as the concrete mechanism by which Security Domains ask the
+kernel to perform privileged GlobalPlatform actions. Ordinary
+applications may use unprivileged services, but they should not be able
+to cross that authority boundary by merely reproducing the visible APDU
+format of a management command.
+
+This service boundary is also the place where the architecture should
+remain most explicit about privilege granularity. A Security Domain
+should not receive a generic ``kernel mode'' escape hatch. It should
+receive only the specific privileged operations needed to realize its
+GlobalPlatform role. This is important for two reasons:
+\begin{itemize}
+\item it limits the blast radius of a compromised administrative
+  application;
+\item it keeps the privilege model aligned with the GlobalPlatform object
+  model of Chapter~4 instead of collapsing everything into one
+  undifferentiated superuser privilege.
+\end{itemize}
+
+In that sense, the service boundary is not only an implementation device;
+it is one of the principal security controls of the system.
+
+%--------------------------------------------------
+\section{Isolation Model}
+\label{sec:system-isolation-model}
+
+% Plan:
+% - make explicit the different isolation levels
+% - connect them to threat model
+% - distinguish kernel/application, admin/ordinary, and app/app isolation
+
+The software stack just described naturally induces several nested
+isolation relations. Making them explicit is important, because
+Chapter~2 identified \textbf{isolation between applications},
+\textbf{runtime integrity}, and \textbf{non-bypassability} as core
+security goals.
+
+\subsection{Kernel-versus-Application Isolation}
+
+The strongest boundary is the one separating the kernel from every
+application-level component, whether administrative or ordinary. The
+kernel owns the trusted execution substrate for:
+\begin{itemize}
+\item selected-context management;
+\item registry and lifecycle authority;
+\item key ownership and secure-channel state;
+\item privileged effects on persistent platform state.
+\end{itemize}
+
+Applications may request services across this boundary, but they must not
+be able to bypass it. In particular, neither a Security Domain nor an
+ordinary application should be able to transform ``being selected'' into
+``executing with arbitrary kernel authority.'' This boundary is the main
+answer to the Chapter~2 assumptions about trusted execution and runtime
+integrity.
+
+\subsection{Administrative-Application Isolation}
+
+Administrative applications, notably Security Domains, sit above the
+kernel but below ordinary applications in authority. They are privileged
+with respect to the service interface, but they are still applications.
+They therefore require their own containment properties:
+\begin{itemize}
+\item they should not be able to tamper with kernel memory or code;
+\item they should not automatically inherit each other's authority if
+  multiple Security Domains coexist;
+\item they should only access platform state through the kernel-mediated
+  interfaces and the privileges explicitly granted to them.
+\end{itemize}
+
+This is the right way to think about a compromised administrator in the
+present architecture. Compromise of an administrative application is
+serious, but it should still be analyzable in terms of the privileges
+granted to that Security Domain and the kernel operations it can
+legitimately invoke.
+
+\subsection{Ordinary-Application Isolation}
+
+Ordinary applications require mutual isolation from one another. At a
+minimum, this means that one application should not be able to:
+\begin{itemize}
+\item read or overwrite another application's private state;
+\item alter another application's lifecycle or registration state;
+\item hijack another application's selected context;
+\item exploit a shared service path to escape its own authority level.
+\end{itemize}
+
+This is the direct architectural response to the malicious internal
+application adversary of Chapter~2. The fact that applications share the
+same APDU transport and may coexist under the same Security Domain must
+not be allowed to collapse their isolation boundaries.
+
+\subsection{Administrative-versus-Ordinary Isolation}
+
+One particularly important case is the isolation boundary between
+administrative applications and ordinary ones. The former may legitimately
+manage the latter, but that management relationship must not be confused
+with arbitrary data or code-level visibility.
+
+Put differently: a Security Domain may hold authority \emph{over} an
+application in the sense of installation, lifecycle, privilege
+assignment, personalization, or deletion, without thereby becoming a
+mechanism that breaks all runtime isolation with that application. This
+distinction is important if the platform later wants to support several
+administrative domains or to reason about delegated management without
+collapsing all application boundaries.
+
+\subsection{Isolation Summary}
+
+The intended hierarchy can therefore be summarized as follows:
+\begin{itemize}
+\item the \textbf{kernel} is isolated from all applications and mediates
+  all privileged effects;
+\item \textbf{GP administrative applications} are isolated from the
+  kernel, but possess privileged, kernel-mediated capabilities;
+\item \textbf{ordinary applications} are isolated from the
+  kernel and from GP administrative applications except through explicit
+  mediated interfaces;
+\item \textbf{applications in general} are isolated from one another,
+  whether they are ordinary or administrative, except where the platform
+  intentionally defines a controlled sharing or delegation mechanism.
+\end{itemize}
+
+This is the main security reading of the three-layer architecture. It is
+what allows the chapter to claim that Security Domains can be treated as
+full applications without giving up the isolation goals that motivated
+the architecture in the first place.
+
+%--------------------------------------------------
+\section{Discussion}
+
+% Plan:
+% - summarize chapter 5 as the system reading of chapter 4
+% - point forward to implementation chapter
+
+This chapter has translated the conceptual distinctions of Chapter~4 into
+a software architecture: a small kernel handles context-defining
+commands, selected applications receive ordinary APDUs through a common
+dispatch mechanism, Security Domains are realized as privileged
+administrative applications, and sensitive effects remain mediated by the
+kernel.
+
+This is the architectural reading that guides the reference
+implementation. Chapter~8 returns to it from a code-level perspective and
+describes how the transport loop, dispatch layer, cryptographic support,
+and future registry and lifecycle services realize this decomposition in
+practice.
+
+Its main security claim is not that privileged applications disappear,
+but that they can be treated as first-class applications without
+sacrificing analyzable authority boundaries. The kernel remains the
+non-bypassable mediation point; Security Domains remain powerful but
+bounded administrative principals; and ordinary applications remain
+isolated both from the kernel and from one another.
+
+%--------------------------------------------------

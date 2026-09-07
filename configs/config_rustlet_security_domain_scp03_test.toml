@@ -1,0 +1,28 @@
+[secure_channel]
+protocols = ["SCP03"]
+scp03_profile = "S8"
+
+[root.package]
+path = "./rustlets/complete_security_domain"
+aid = "A0:00:00:47:50:4F:53:06"
+
+[root.instance]
+aid = "A0:00:00:47:50:4F:53:04"
+install_bytes = "FF:FF:FF"
+
+[[root.keys]]
+type = "Scp03Static"
+version = 1
+id = 3
+usage = "Enc"
+material = "40:41:42:43:44:45:46:47:48:49:4A:4B:4C:4D:4E:4F"
+
+[[root.keys]]
+type = "Scp03Static"
+version = 1
+id = 3
+usage = "Mac"
+material = "50:51:52:53:54:55:56:57:58:59:5A:5B:5C:5D:5E:5F"
+
+[[root.packages]]
+path = "./rustlets/tests/minimal_valid_test"

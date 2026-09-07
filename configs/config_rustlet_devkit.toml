@@ -1,0 +1,19 @@
+# Rustlet development-kit image.
+#
+# This composition contains no predeployed Rustlet, no child Security Domain,
+# and no Secure Channel. "Development kit" is inferred from those declared
+# objects and policies; it is not a separate kernel-image mode.
+# NullSecurityDomain supplies the root registry authority and accepts clear
+# management commands without cryptographic authentication. The kernel still
+# validates the structure, hash, ISA and ABI of every dynamically loaded FAE.
+
+[secure_channel]
+protocols = []
+
+[root.package]
+name = "NullSecurityDomain"
+aid = "A0:00:00:47:50:4F:53:01"
+
+[root.instance]
+aid = "A0:00:00:47:50:4F:53:01"
+install_bytes = "FF:FF:FF"

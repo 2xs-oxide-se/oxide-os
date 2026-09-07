@@ -1,0 +1,546 @@
+\chapter{Architecture Overview}
+
+This document studies \textbf{oXiDe SE}, a concrete open source secure-element
+operating system and its reference implementation. The architecture presented
+here is therefore not only a generic interpretation of GlobalPlatform: it is
+the security and software architecture against which the oXiDe SE source tree,
+build configurations, and validation results are to be evaluated. Where the
+document generalizes from the implementation, it does so explicitly in order to
+identify design principles that may be reused by other open secure-element
+systems.
+
+oXiDe SE is designed to run under QEMU in order to make development, testing,
+and external contributions easier, but its intended deployment targets are
+real, readily available microcontrollers. The current ports cover the Arm
+Cortex-M architecture profiles Armv6-M, Armv7-M, and Armv8-M. The primary
+targets are \texttt{mps2-an385}, \texttt{raspi-pico1}, and
+\texttt{raspi-pico2}: the first two can be exercised under QEMU, while the two
+Raspberry Pi Pico generations are also validated on widely available physical
+boards.
+
+The architecture is also intended to support deployment in the Arm TrustZone
+secure world on processors that provide it. In this configuration, oXiDe SE
+would expose secure-element services from an isolated execution environment and
+act as a \emph{virtual Secure Element} for software running outside that trusted
+world.
+
+%--------------------------------------------------
+\section{oXiDe SE Architectural Contribution}
+
+GlobalPlatform defines an external management model, its managed entities, and
+the protocols used to administer them. It does not prescribe one unique
+internal operating-system decomposition. The architectural contribution of
+oXiDe SE lies in the way it maps that model onto a small Rust-based embedded
+system:
+
+\begin{itemize}
+\item a deliberately narrow kernel owns platform-global control flow,
+  selection, APDU mediation, isolation, and the structural invariants of the
+  persistent registry;
+\item Security Domains are first-class administrative application-like objects
+  rather than labels or a collection of unrelated special cases embedded
+  throughout the kernel;
+\item a Security Domain supplies authority, policy, and secure-channel context,
+  while the kernel retains validation, non-escalation checks, and final
+  mediation of privileged effects;
+\item ordinary applications, called \emph{Rustlets}, are independently built
+  FAE images executed behind a narrow ABI and a privileged-service boundary.
+  They are generally intended for post-issuance deployment, although oXiDe SE
+  also permits Rustlets to be embedded in an image before issuance. These two
+  positions relative to issuance are shown in
+  Figure~\ref{fig:se-lifecycle-actors} and explained further in
+  Section~\ref{sec:gp-deployment-workflow};
+\item target-specific hardware support and development backends are kept below
+  the same APDU and application model, while their distinct security properties
+  remain explicit.
+\end{itemize}
+
+The central architectural proposition is not merely that GlobalPlatform
+commands can be implemented in Rust. It is that GlobalPlatform administration can be decomposed
+between a small invariant-enforcing kernel and bounded administrative
+applications without giving ordinary applications direct access to
+platform-global state. This separation is intended to make authority,
+isolation, persistence, and command dispatch independently analyzable.
+
+%--------------------------------------------------
+\section{Trusted Computing Base}
+
+For this manual, the trusted computing base (TCB) comprises the components whose
+correctness is required to support the security properties sought for an
+oXiDe SE image. Its exact hardware portion depends on the selected target, but
+its software portion includes:
+
+\begin{itemize}
+\item the trusted boot and execution substrate, including the target support
+  used for exception handling, memory protection, interrupts, transport,
+  persistent flash, cryptographic primitives, and entropy acquisition;
+\item the kernel code that parses and mediates APDUs, maintains the selected
+  context, enforces isolation, validates privileged requests, owns the registry,
+  and commits persistent mutations;
+\item every privileged component statically linked into the kernel image,
+  including any build-selected kernel-resident module;
+\item the root Security Domain and each administrative Security Domain, but only
+  for the policy and authority entrusted to that domain. A Rustlet-backed
+  Security Domain remains isolated by the kernel, yet its authorization logic
+  is part of the policy TCB for its own administrative subtree;
+\item the configured trust anchors, privilege assignments, and build-time
+  security configuration that determine which authorities the resulting image
+  accepts.
+\end{itemize}
+
+Ordinary Rustlets are explicitly outside the TCB and must be treated as
+potentially malicious. They may affect their own state and obtain only effects
+granted through mediated services. A compromised supplementary Security Domain
+may misuse its delegated authority, but the kernel is expected to prevent that
+authority from escaping its assigned subtree or bypassing platform invariants.
+
+The compiler, image-construction tools, provisioning process, and hardware
+supply chain are necessary trust assumptions for producing the initial trusted
+image, but they are not resident components of the runtime TCB. QEMU, host-side
+test programs, and semihosting services are likewise outside that runtime TCB.
+Chapter~2 states the corresponding attacker model, assumptions, and exclusions.
+
+%--------------------------------------------------
+\section{How The Architecture Is Assessed In This Manual}
+
+This overview introduces design objectives; it does not present them as
+formally established guarantees. The remainder of the manual progressively
+describes the mechanisms, intended properties, assumptions, known limits, and
+available validation evidence against which oXiDe SE can be assessed:
+
+\begin{itemize}
+\item Chapter~2 defines the assets, adversaries, trust assumptions, security
+  goals, and explicitly out-of-scope attacks;
+\item Chapter~3 defines the APDU, command-dispatch, and secure-channel protocol
+  contracts at the external boundary;
+\item Chapter~4 defines the managed-object, lifecycle, deployment, and
+  administrative-authority invariants inherited from the GlobalPlatform model;
+\item Chapter~5 identifies the internal decomposition, kernel responsibilities,
+  privileged-service boundary, Security Domain authority, and isolation model;
+\item Chapter~6 defines registry persistence and the transactional behavior
+  required across interrupted flash updates and resets;
+\item Chapter~7 defines the Rustlet execution and ABI model, including the
+  application-facing boundary and its isolation requirements;
+\item Chapter~8 maps those abstractions to the reference implementation and
+  records the present implementation scope and limitations;
+\item the appendices refine the T=0 and secure-channel encodings and document
+  the provenance and limits of the regression material used for validation.
+\end{itemize}
+
+The companion abstract model in \texttt{docs/model.md} collects the principal
+state invariants and reasoning obligations in a lightweight Hoare-style
+notation. These obligations have not yet been discharged through a complete
+formal verification. The source code and executable tests provide implementation
+and regression evidence, not a formal proof or a security certification.
+Likewise, passing under QEMU does not establish security on physical hardware.
+
+%--------------------------------------------------
+\section{Secure Element Ecosystem and Lifecycle}
+
+Before introducing the technical decomposition of the platform, it is useful to
+place the secure element in its operational ecosystem. A secure element does
+not exist in isolation: it changes hands several times during its life, and
+different actors contribute different layers of hardware, software,
+configuration and deployed services.
+
+For the purpose of this manual, the surrounding ecosystem is organized around
+five actor categories.
+
+\begin{itemize}
+\item \textbf{Foundries} manufacture the silicon and deliver the physical secure
+  element as a hardware component.
+\item \textbf{Providers} integrate the hardware into a usable platform,
+  implement the base software stack, and package the secure element together
+  with its kernel and foundational services.
+\item \textbf{Issuers} distribute the resulting device or object and control its
+  initial personalization, provisioning and operational enrollment.
+\item \textbf{Service providers} deploy service-specific applications and data,
+  either during manufacturing, under agreement with the issuer, or later in the
+  field through post-issuance channels such as OTA updates.
+\item \textbf{End users} operate the final device and consume the services
+  exposed through the secure element, often without directly perceiving the
+  existence of the secure element itself.
+\end{itemize}
+
+These actors intervene at different moments of the secure-element lifecycle and
+do not all manipulate the same interfaces. Foundries first create the physical
+substrate. Providers then transform that substrate into a secure-element
+platform by activating the hardware, deploying the kernel and installing the
+base software that will later anchor the root of trust. Issuers receive that
+platform and personalize it for a product line or deployment context. Service
+providers add dedicated applications and associated secrets. End users finally
+interact with the resulting device through its exposed services and external
+communication channels.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[
+    scale=0.92,
+    transform shape,
+    stage/.style={
+      draw,
+      rounded corners=3pt,
+      minimum width=2.8cm,
+      minimum height=1.3cm,
+      align=center,
+      font=\small
+    },
+    state/.style={
+      draw,
+      dashed,
+      rounded corners=3pt,
+      minimum width=2.3cm,
+      minimum height=0.9cm,
+      align=center,
+      font=\small,
+      fill=white,
+      inner sep=3pt
+    },
+    zone/.style={
+      font=\small\itshape
+    },
+    >=Latex
+  ]
+
+    % --- Top line
+    \node[stage] (foundry) at (0,0) {\textbf{Foundry}\\Fabrication};
+    \node[state] (birth) at (3.3,0) {Birth};
+    \node[stage] (provider) at (7.0,0) {\textbf{Provider}\\Activation, kernel\\deployment, base apps};
+    \node[state] (rot) at (10.8,0) {Root of Trust};
+    \node[stage] (issuer) at (14.6,0) {\textbf{Issuer}\\Personalization, base\\configuration};
+
+    % --- Bottom line (recentered)
+    \node[stage] (user) at (7.0,-3.0) {\textbf{End User}\\Service usage, app\\request, field operation};
+    \node[state] (prov) at (10.8,-3.0) {Provisioning};
+    \node[stage] (sp) at (14.6,-3.0) {\textbf{Service Provider}\\Additional app\\deployment};
+
+    % --- Top flow 
+    \draw[->, thick] (foundry.east) -- (birth.west);
+    \draw[->, thick] (birth.east) -- (provider.west);
+    \draw[->, thick] (provider.east) -- (rot.west);
+    \draw[->, thick] (rot.east) -- (issuer.west);
+
+    % --- Separation line (drawn first so nodes can mask it) 
+    \draw[dashed, thick] (-1.2,-1.5) -- (16.2,-1.5);
+
+    % --- Zone labels
+    \node[zone, anchor=west] at (-1.0,-1.15) {Trusted / controlled environment};
+    \node[zone, anchor=west] at (-1.0,-1.85) {Operational / open environment};
+
+    % --- Issuance node (positionné entre les deux)
+    \node[state] (issuance) at (10.8,-1.5) {Issuance};
+
+    % --- Arrow 1: Issuer -> Issuance (descend puis gauche)
+    \draw[->, thick]
+      (issuer.south) -- ++(0,-0.8) |- (issuance.east);
+
+    % --- Arrow 2: Issuance -> End User (gauche puis descend)
+    \draw[->, thick]
+      (issuance.west) -| (user.north);
+
+    % --- Provisioning flow
+    \draw[->, thick] (user.east) -- (prov.west);
+    \draw[->, thick] (prov.east) -- (sp.west);
+
+  \end{tikzpicture}
+  \caption{Simplified lifecycle of a secure element and transfer of responsibility between actors.}
+  \label{fig:se-lifecycle-actors}
+\end{figure}
+
+Figure~\ref{fig:se-lifecycle-actors} should not be read as a rigid industrial
+workflow. In practice, a single organization may play several roles, and some
+deployment steps may occur earlier or later depending on the business model.
+The important point for the rest of this manual is that the same secure element
+progressively accumulates hardware properties, kernel-level trust anchors,
+issuer-specific configuration and service-provider payloads before being used
+in the field.
+
+The architecture is structured into four major components.
+
+%--------------------------------------------------
+\section{Communication and Protocol}
+
+This component is responsible for handling all interactions between the
+external world and the platform. It defines how commands are transported,
+interpreted and secured. It is the entry point through which incoming requests
+must pass for decoding and validation before execution;
+the effectiveness of those checks is assessed in the later protocol and
+implementation chapters.
+
+\begin{itemize}
+\item \textbf{APDU transport layer} \gpref{gp-card}{§5.3, §9.4}
+\item \textbf{APDU parser and dispatcher} \gpref{gp-card}{§9.4, §11}
+\item \textbf{Secure Channel Protocol (SCP)} \gpref{scp03}{§4, §6, §7}
+\end{itemize}
+
+The APDU transport layer corresponds to the low-level communication defined in
+ISO/IEC 7816 and referenced in the GlobalPlatform card specification. Sections
+§5.3 and §9.4 describe how commands are encapsulated and exchanged. This layer
+is responsible for transporting APDUs across the selected physical or emulated
+medium while preserving the command representation expected by the parser.
+
+The APDU parser and dispatcher implements the command interpretation logic
+described in §9.4 and §11. It decodes the APDU structure and maps each command
+(such as INSTALL, LOAD, DELETE) to its corresponding internal handler. This
+component effectively bridges the external protocol with the internal execution
+model.
+
+The Secure Channel Protocol, described in SCP03 (§4, §6, §7), introduces
+cryptographic protection over APDU exchanges. It defines how sessions are
+established, how keys are derived, and how messages are authenticated and
+optionally encrypted. The protocol is intended to provide integrity and
+confidentiality for administrative commands when it is correctly configured,
+implemented, and used within its stated assumptions.
+
+%--------------------------------------------------
+\section{GlobalPlatform Conceptual Model}
+
+This component introduces the main conceptual entities manipulated by a
+GlobalPlatform secure element. It describes what kinds of objects exist on the
+secure element, how they relate to each other, how their lifecycle is controlled,
+and how administration authority is represented. It remains at the level
+of GlobalPlatform concepts rather than of internal software
+decomposition.
+
+\begin{itemize}
+\item \textbf{Managed objects}: load files, application instances, and Security
+  Domains \gpref{gp-card}{§7, §9}
+\item \textbf{AID-based identification and relationships}
+  \gpref{gp-card}{§6.2, §7}
+\item \textbf{Lifecycle states and transitions}
+  \gpref{gp-card}{§9.6}
+\item \textbf{Deployment and personalization workflows}
+  \gpref{gp-card}{§9, §11}
+\item \textbf{Administrative authority and privileges}
+  \gpref{gp-card}{§7, §11.1.2}
+\end{itemize}
+
+This conceptual layer explains, for instance, why a load file, an
+installed application instance, and a Security Domain are distinct
+entities even when they are operationally related.
+
+It also explains why commands such as \texttt{LOAD}, \texttt{INSTALL},
+\texttt{DELETE}, \texttt{PUT KEY}, or \texttt{SET STATUS} should be read
+against a shared administration model rather than as isolated APDU
+opcodes.
+
+The implementation-specific mapping of those concepts onto a kernel and
+resident applications is deferred to the later execution-model chapter.
+
+%--------------------------------------------------
+\section{Model, Security and Core Services}
+
+This component defines the internal structure of the platform. It is
+responsible for maintaining consistency, enforcing isolation and providing the
+cryptographic foundation required for secure operations.
+
+\begin{itemize}
+\item \textbf{Registry of managed objects} \gpref{gp-card}{§9.3}
+\item \textbf{AID management} \gpref{gp-card}{§6.2, §9.3.1}
+\item \textbf{Secure persistence} \gpref{gp-card}{§9}
+\item \textbf{Security Domains} \gpref{gp-card}{§7}
+\item \textbf{Privilege and access control} \gpref{gp-card}{§11.1.2}
+\item \textbf{Key management} \gpref{scp03}{§6.2, §6.3}
+\item \textbf{Cryptographic services} \gpref{scp03}{§6}
+\item \textbf{Logging and audit} \gpref{gp-card}{§9}
+\end{itemize}
+
+The registry, described in §9.3, maintains the internal representation of all
+entities managed by the platform. It is the authoritative source of truth for
+application instances, load files and Security Domains.
+
+AID management, defined in §6.2 and §9.3.1, is intended to maintain unique
+identification of all entities. It also supports selection mechanisms used by
+APDU commands.
+
+Secure persistence is intended to keep the registry and associated metadata
+transactionally consistent across resets. The concrete mechanism, failure
+model, and current validation evidence are described later in this manual.
+
+Security Domains (§7) define administrative boundaries. They allow grouping
+applications under a shared authority and delegating management capabilities.
+
+Privileges and access control (§11.1.2) define what operations an application
+or domain can perform. These include administrative rights such as loading or
+deleting applications.
+
+Key management and cryptographic services are defined in SCP03 (§6). They
+specify how keys are stored, derived and used for secure communication.
+
+Logging and audit mechanisms provide traceability of operations and support
+debugging and security analysis.
+
+%--------------------------------------------------
+\section{System Decomposition and Execution Model}
+
+This component describes the internal software architecture chosen by the
+project to realize the GlobalPlatform concepts introduced above. It is
+explicitly an implementation reading of the specification rather than a
+normative statement about how every GlobalPlatform secure element must be built.
+
+\begin{itemize}
+\item \textbf{A small kernel handling platform-global control flow}
+\item \textbf{Administrative applications}, notably Security Domains
+\item \textbf{Ordinary applications selected and invoked through APDUs}
+\item \textbf{A privileged service boundary} between applications and
+  kernel-managed effects
+\end{itemize}
+
+The resulting model keeps \texttt{SELECT} and other context-defining
+operations in the kernel while routing most other APDUs to the currently
+selected AID-associated entity.
+
+In that decomposition, Security Domains are realized as privileged
+administrative applications rather than as ad hoc kernel branches for
+every management command. This keeps APDU dispatch uniform while still
+preserving a strict authority boundary for sensitive operations.
+
+%--------------------------------------------------
+
+\section{Layered Architecture}
+
+The architecture introduced in the previous sections can be summarized as a
+layered stack. 
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[
+    layer/.style={
+      draw,
+      rounded corners=3pt,
+      minimum width=10cm,
+      minimum height=1.1cm,
+      align=center
+    },
+    >=Latex
+  ]
+    \node[layer] (apdu) at (0,0)    {\textbf{APDU Communication}\\Transport, APDU parsing, secure channel};
+    \node[layer] (admin) at (0,1.8) {\textbf{Administration}\\Loading, installation, lifecycle, deployment};
+    \node[layer] (model) at (0,3.6) {\textbf{Model and Security}\\Registry, AID management, domains, privileges, cryptographic services};
+    \node[layer] (runtime) at (0,5.4) {\textbf{Runtime and Services}\\Application execution, invocation, service model};
+    \node[layer] (apps) at (0,7.2)  {\textbf{Applications}\\Installed and managed application instances};
+
+    \draw[->, thick] (apdu.north) -- (admin.south);
+    \draw[->, thick] (admin.north) -- (model.south);
+    \draw[->, thick] (model.north) -- (runtime.south);
+    \draw[->, thick] (runtime.north) -- (apps.south);
+  \end{tikzpicture}
+  \caption{Layered view of an open source GlobalPlatform environment architecture.}
+  \label{fig:gp-layered-architecture}
+\end{figure}
+
+This representation emphasizes the separation of concerns between
+communication, administration, internal security mechanisms and application
+execution. It also makes explicit the direction of dependency: upper layers
+rely on the services provided by lower layers, while lower layers remain
+agnostic to the internal logic of upper layers.
+
+Figure~\ref{fig:gp-layered-architecture} highlights the main architectural
+principle of the platform. The bottom layer handles communication concerns and
+provides a normalized command entry point through APDU processing and secure
+messaging. On top of it, the administration layer implements the management
+logic required to deploy and control applications. The model and security layer
+provides the persistent representation of managed entities together with the
+mechanisms that enforce isolation and authorization. Finally, the runtime layer
+hosts the execution model exposed to applications. This organization reflects
+the fact that GlobalPlatform strongly structures the lower and middle parts of
+the stack, while leaving more freedom to the implementation of the execution
+environment itself.
+
+%--------------------------------------------------
+\section{Glossary}
+
+Unless stated otherwise, the technical vocabulary of this document follows
+ISO/IEC~7816 for transport-level concepts and the GlobalPlatform Card
+Specification for secure-element-management concepts \gpref{iso7816-4}{§5, §6}
+\gpref{gp-card}{§1.4, §6.5, §7}. The purpose of the present glossary is
+twofold:
+\begin{itemize}
+\item to define the technical terms used throughout the document;
+\item to keep the text \textbf{secure-element centric}, even though a large
+  part of the normative literature remains historically \textbf{card}
+  centric.
+\end{itemize}
+
+In other words, this document prefers \textbf{secure element} as the generic
+system concept, while still acknowledging that ISO/IEC~7816 and
+GlobalPlatform often use the word \textbf{card} for the emblematic and
+historically dominant form of such a device.
+
+\begin{itemize}
+\item \textbf{secure element}: the preferred generic term for the protected
+  computing device targeted by this document. It designates the platform that
+  stores keys, hosts managed applications, executes APDU commands, and enforces
+  the relevant isolation and lifecycle policies.
+\item \textbf{card}: the historical and normative term used throughout
+  ISO/IEC~7816 and the GlobalPlatform Card Specification for an emblematic
+  class of secure element. In this manual, it is retained when the wording of
+  the standards is being discussed directly, or when using fixed protocol terms
+  such as \emph{card challenge}, \emph{card cryptogram}, or \emph{card
+  management command}.
+\item \textbf{off-card entity}: the preferred GlobalPlatform term for the
+  external party interacting with the secure element.
+\item \textbf{interface device}: the ISO/IEC~7816 transport-level term for the
+  equipment that exchanges APDUs with the secure element.
+\item \textbf{host}: the preferred SCP03 term for the external peer in secure
+  channel establishment, notably in \emph{host challenge} and \emph{host
+  cryptogram}.
+\item \textbf{command APDU}: an APDU sent from the interface device or
+  off-card entity to the secure element.
+\item \textbf{response APDU}: an APDU returned by the secure element to the
+  interface device or off-card entity.
+\item \textbf{header}: the four command bytes \texttt{CLA}, \texttt{INS},
+  \texttt{P1}, and \texttt{P2}.
+\item \textbf{incoming data}: the command payload transported from the
+  interface device to the secure element and logically measured by
+  \texttt{Lc}.
+\item \textbf{outgoing data}: the response payload returned by the secure
+  element before the final status word and logically measured by \texttt{Le}.
+\item \textbf{status word}: the two-byte trailer \texttt{SW1/SW2} appended to
+  a response APDU.
+\item \textbf{ATR}: the \emph{Answer To Reset}, i.e. the first byte string
+  emitted by the secure element after activation/reset and before the APDU
+  command stream begins.
+\item \textbf{\texttt{T=0} transport}: the half-duplex, character-oriented
+  transport defined by ISO/IEC~7816-3.
+\item \textbf{deferred response}: the \texttt{T=0} realization of a logical
+  Case~4 exchange, where response data is first announced by \texttt{61xx} and
+  then recovered through one or more \texttt{GET RESPONSE} commands.
+\item \textbf{application instance}: the preferred term for the installed
+  application object managed by the secure element and later selected through
+  its AID.
+\item \textbf{ordinary application}: a non-administrative application instance
+  implementing business logic rather than GlobalPlatform administration.
+\item \textbf{administrative application}: an application-level component that
+  implements administrative semantics and is granted privileged access to
+  kernel-mediated services. In the present architecture, Security Domains are
+  realized in this category.
+\item \textbf{Security Domain}: the GlobalPlatform administrative principal
+  associated with keys, privileges, and management authority.
+\item \textbf{Issuer Security Domain}: the distinguished Security Domain that
+  anchors the main administrative authority of the secure element.
+\item \textbf{Card Manager}: a broader historical label often associated in
+  practice with the Issuer Security Domain or with its operational role. This
+  document keeps \emph{Issuer Security Domain} as the more precise preferred
+  term.
+\item \textbf{Executable Load File}: the deployable executable content object
+  transported through \texttt{LOAD}. After first introduction, this manual uses
+  the shorter form \textbf{load file}.
+\item \textbf{GlobalPlatform Registry}: the authoritative catalogue of managed
+  objects, identities, privileges, lifecycle states, and dependencies within
+  the secure element. After first introduction, this manual uses the shorter
+  form \textbf{registry}.
+\item \textbf{selected application}: the GlobalPlatform application currently
+  selected on a logical channel and therefore designated to receive ordinary
+  APDUs after the context-setting phase.
+\item \textbf{selected context}: the broader internal execution state that
+  includes, but is not limited to, the selected application. This term is kept
+  for implementation discussions where the selection state carries additional
+  channel or transport information.
+\item \textbf{card management command}: the GlobalPlatform term for an APDU
+  that operates on managed objects, lifecycle state, key material, or other
+  administrative state of the secure element under the authority of a Security
+  Domain.
+\end{itemize}
+
+%--------------------------------------------------

@@ -1,0 +1,21 @@
+# Samsung OpenSCP-Java SCP03 AES-128/S16 establishment vector.
+#
+# Provenance:
+# - https://github.com/Samsung/OpenSCP-Java
+# - src/test/java/com/samsung/openscp/testdata/InputTestData.java
+# - src/test/java/com/samsung/openscp/testdata/SmartCardScp03Aes128S16ModeEmulation.java
+#
+# OpenSCP-Java is Apache-2.0 licensed. These values are independent regression
+# evidence, not GlobalPlatform certification vectors.
+
+static_enc_key = 1D72CD9283FD55162722C6BEAA4DC187
+static_mac_key = F4932BA02FFC3098D172790099D28382
+host_challenge = 06F85B77251BF79406F85B77251BF794
+initialize_update_response = A1A012430585513120853003710617A2C34D50B562F7DECFC3DBF58A649EF733B7486D813C92E4CA61E5102F9100082A
+card_challenge = 0617A2C34D50B562F7DECFC3DBF58A64
+card_cryptogram = 9EF733B7486D813C92E4CA61E5102F91
+session_enc_key = A3AD5D334F1BC6E38BD72A78481AB62B
+session_mac_key = 345C7B5448F7FA85C484F185D944A66E
+session_rmac_key = 22C13D41598B58A0A39FA9FA235FAAB0
+host_cryptogram = 1C6A43582F842A90D81CA4E970754664
+external_authenticate = 84823300201C6A43582F842A90D81CA4E970754664D8C0C6C340E007C5C6EBCDF4F7C065BE

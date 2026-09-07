@@ -1,0 +1,1966 @@
+\chapter{Reference Implementation}
+
+This document is associated with a reference implementation available at:
+
+\begin{center}
+\url{https://github.com/your-repository/globalplatform-open}
+\end{center}
+
+The current code base is organized as a small workspace with three main
+Rust crates:
+
+\begin{itemize}
+\item \texttt{core}, a reusable embedded library crate that provides the
+  runtime, target dispatch, serial, semihosting, flash and crypto
+  services;
+\item \texttt{gp\_kernel}, the production firmware crate that owns the
+  current APDU main loop and application dispatch;
+\item \texttt{core\_test}, a dedicated embedded test firmware used to
+  exercise the shared runtime under QEMU and report machine-readable
+  verdicts through semihosting.
+\end{itemize}
+
+This separation avoids mixing production entry points, reusable
+services, and test-only firmware logic in a single crate. It also makes
+it possible to run host-side \texttt{cargo test} orchestration against
+real embedded binaries executed under QEMU, rather than against a hosted
+simulation of the embedded code.
+
+\section{APDU Transport over T=0}
+\label{sec:impl-apdu-t0}
+% --- APDU T=0 transport and mapping ---
+% This section describes how the abstract APDU model is mapped onto the T=0 protocol.
+% It should explain:
+% - APDU cases (Case 1–4)
+% - byte-level exchange (procedure bytes, SW1/SW2 timing)
+% - handling of Lc/Le
+% - fragmentation strategy for LOAD
+% - interaction with secure messaging (wrapping before transport)
+
+The current reference implementation establishes a small but explicit
+\texttt{T=0}-style exchange model before introducing full command
+semantics. At boot, the runtime emits an ATR in direct convention
+(\texttt{TS = 3B}), announces a single interface byte through
+\texttt{T0 = 1C}, publishes the default serial-rate byte
+\texttt{TA1 = 11}, carries twelve historical bytes, and then enters the
+main APDU loop.
+
+As specified in Section~\ref{sec:apdu-serial-adaptation}, the current boards carry
+this exchange over a conventional serial link; they do not reproduce the
+ISO/IEC~7816 contact-card electrical interface. The byte transport remains
+behind \texttt{TransportLayer} so that an ISO/IEC~7816-capable target can
+provide the reference physical link without changing the \texttt{T=0} state
+machine or the APDU layers above it.
+
+Those historical bytes are encoded as ISO compact-TLV data:
+\begin{verbatim}
+80 56 09 C1 DE 5E xx yy 73 80 00 00
+\end{verbatim}
+The first byte, \texttt{80}, is the category indicator that makes the
+remaining historical bytes a compact-TLV sequence. The object
+\texttt{56 09 C1 DE 5E xx yy} uses compact tag~5, length~6, as issuer data:
+\texttt{09 C1 DE 5E} is the Oxide SE marker, \texttt{xx} is the
+OS version byte, and \texttt{yy} is a build-capability bitmap.
+In the current build \texttt{xx = 09}, meaning version 0.9 beta. In the
+\texttt{yy} bitmap, bit~7
+is set when the root Security Domain is
+not \texttt{NullSecurityDomain}; bits~6,~5 and~4 advertise compiled and
+enabled SCP11a, SCP11b and SCP11c support; bits~3 and~2 are reserved;
+and bits~1--0 encode SCP03 support (\texttt{00}: none, \texttt{10}:
+S8, \texttt{11}: S16).
+
+The object \texttt{73 80 00 00} is the ISO Card Capabilities compact
+TLV, tag~7 and length~3. Oxide SE deliberately advertises only the
+minimal capability it really supports here: selection by full DF name,
+which matches SELECT by AID. It does not advertise an ISO file system,
+record or binary EF commands, extended APDUs, or ISO logical-channel
+management.
+
+Each loop iteration reads only the five command-header bytes
+(\texttt{CLA}, \texttt{INS}, \texttt{P1}, \texttt{P2}, and the fifth
+length byte) and constructs one transport-owned APDU session. The base
+\texttt{T=0} layer does not attempt to decide on its own whether that
+fifth byte is
+\texttt{Lc} or \texttt{Le}. Instead, command logic receives an
+APDU-facing object and explicitly requests incoming or outgoing
+behavior. This choice follows the same idea as Java Card:
+\texttt{T=0} transport first captures the command header, while the
+command logic decides whether it is about to consume command data or to
+prepare response data.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[
+    stage/.style={
+      draw,
+      rounded corners=2pt,
+      minimum width=3.1cm,
+      minimum height=0.9cm,
+      align=center,
+      font=\footnotesize
+    },
+    arrow/.style={->, thick, >=Latex}
+  ]
+    \node[stage] (atr) {Boot\\send ATR};
+    \node[stage, right=1.0cm of atr] (hdr) {Read only the\\5-byte APDU header};
+    \node[stage, right=1.0cm of hdr] (proc) {Build \texttt{Apdu}\\call \texttt{process\_apdu()}};
+    \node[stage, below left=1.25cm and 0.55cm of proc] (direct) {Outgoing only\\send bytes now\\then append status};
+    \node[stage, below right=1.25cm and 0.55cm of proc] (deferred) {Incoming consumed and\\outgoing prepared\\store bytes and return \texttt{61xx}};
+    \node[stage, below=1.25cm of deferred] (getresp) {\texttt{GET RESPONSE}\\send next chunk\\then status or \texttt{61xx}};
+
+    \draw[arrow] (atr) -- (hdr);
+    \draw[arrow] (hdr) -- (proc);
+    \draw[arrow] (proc) -- (direct);
+    \draw[arrow] (proc) -- (deferred);
+    \draw[arrow] (deferred) -- (getresp);
+  \end{tikzpicture}
+  \caption{Current \texttt{T=0} APDU exchange flow in the reference implementation.}
+  \label{fig:impl-apdu-exchange}
+\end{figure}
+
+The transport-owned APDU session keeps the five header bytes in
+dedicated scalar fields and exposes a separate fixed data buffer of
+\texttt{256} bytes
+for command or response data. This matches the current short-APDU
+scope, avoids dynamic allocation on the transport path, and stays close
+to the Java Card idea of a single APDU work buffer. The base
+\texttt{T=0} manager retains ownership of actual byte emission
+decisions, while command
+handlers only observe an APDU-facing surface that can request
+``incoming'', ``outgoing'', and ``outgoing length'' transitions.
+
+\subsection{APDU Implementation Surfaces}
+\label{sec:impl-apdu-surfaces}
+
+At this stage, the implementation deliberately separates APDU handling
+into six levels, each with a different responsibility.
+
+\begin{itemize}
+\item \textbf{Byte transport.} The \texttt{TransportLayer} trait owns
+  only byte emission and byte reception. In the current reference
+  implementation it is instantiated either as a serial backend or as a
+  scripted in-kernel simulator.
+\item \textbf{Base \texttt{T=0} manager.} The
+  \texttt{T0ApduManager<T>} object is built on top of a
+  \texttt{TransportLayer}. It owns the current \texttt{T=0} exchange
+  state: the five header bytes, the transport buffer, the deferred
+  response buffer, and the logic for \texttt{61xx},
+  \texttt{GET RESPONSE}, and final \texttt{SW1/SW2} emission.
+\item \textbf{Composable APDU layers.} The \texttt{ApduLayer} trait is
+  the protocol-layer boundary above \texttt{T=0}. It exposes command
+  reception and completion through \texttt{ApduCommand} and
+  \texttt{ApduCompletion}, so higher protocol layers do not need to
+  know the concrete transport-owned APDU representation.
+\item \textbf{Kernel APDU view.} The kernel exposes a narrower
+  \texttt{Apdu} view over that transport state. This is the object used
+  by kernel-side command handlers such as the current
+  \texttt{kernel\_main\_app}.
+\item \textbf{Shared Rustlet ABI buffer.} When a selected Rustlet is
+  called, the kernel stages the current command into a fixed-layout
+  \texttt{RustletCtx}. This ABI object contains the header fields, the
+  current status word, direction metadata, and one fixed payload area.
+\item \textbf{Common APDU trait.} Both the kernel-side \texttt{Apdu}
+  view and the Rustlet-side \texttt{RustletCtx} implement the common
+  \texttt{SEApdu} trait. This is the normalization point of the current
+  implementation: kernel handlers, Rustlet handlers, and the
+  kernel-to-Rustlet bridge expose the same conceptual APDU operations.
+\end{itemize}
+
+This layering is important. \texttt{SEApdu} is not the transport object
+itself. \texttt{ApduLayer} is not the card-side processing interface
+either. \texttt{SEApdu} is the card-side processing interface of ``the
+APDU currently being handled''. In other words:
+\begin{itemize}
+\item \texttt{TransportLayer} owns bytes on the wire;
+\item \texttt{T0ApduManager} owns the \texttt{T=0} state machine;
+\item \texttt{ApduLayer} owns protocol-layer composition above
+  \texttt{T=0};
+\item \texttt{SEApdu} owns the command-processing view seen by command
+  logic.
+\end{itemize}
+
+The present implementation therefore keeps transport semantics in the
+kernel while still giving both kernel-side code and Rustlets a common
+APDU vocabulary. This is the main reason why the current
+\texttt{kernel\_main\_app} and selected-Rustlet dispatch path can be
+written against the same card-side APDU concepts while the byte-level
+\texttt{T=0} policy remains centralized below them.
+
+The current runtime stack instantiated by the kernel is therefore:
+\begin{center}
+\texttt{TransportLayer $\rightarrow$ T0ApduManager $\rightarrow$ ApduLayer wrappers $\rightarrow$ dispatcher $\rightarrow$ SEApdu}
+\end{center}
+
+At the time of writing, the wrapper chain contains a pass-through layer,
+the generic secure-channel layer, and a small tracing layer used for scripted
+debug runs. The secure-channel layer owns the APDU boundary for SCP03 and
+SCP11 establishment. It also owns protected-command unwrapping and
+protected-response wrapping.
+
+\subsection{Implementation Impact of Timing Constraints}
+
+Section~\ref{sec:apdu-t0-timing} explained the transport-level timing
+constraint in general terms. In the present implementation, this leads
+to a very concrete coding rule: the main loop must keep the
+transmit/receive transition points adjacent in the control flow.
+
+In particular, the implementation intentionally treats the following
+boundaries as hot:
+
+\begin{itemize}
+\item after the ATR has been emitted, the code must branch immediately
+  to the command-reception loop;
+\item after the five-byte header has been read, the code must hand
+  control immediately to the APDU handler so that an incoming payload
+  can be received without unrelated work being interposed;
+\item after \texttt{SW1/SW2} has been emitted, the code must fall back
+  immediately to the next command reception;
+\item after a deferred-response \texttt{61xx} status, the code must be
+  ready to receive \texttt{GET RESPONSE} without adding unrelated work
+  on the path.
+\end{itemize}
+
+This is why the current \texttt{gp\_kernel} main loop is deliberately
+minimal and places comments directly at these transition points in the
+source code. The goal is not to claim formal timing conformance from a
+single software structure, but to make the hot path explicit and to
+avoid accidental regressions caused by debug output, bookkeeping, or
+other apparently harmless additions at the wrong place.
+
+The current APDU-facing helpers implement the following contract:
+
+\begin{itemize}
+\item \texttt{set\_incoming\_and\_Receive()} reads exactly
+  \texttt{Lc} bytes from the serial link into the APDU data buffer and
+  marks the APDU as having consumed incoming data;
+\item \texttt{set\_outgoing()} marks the APDU as an outgoing exchange
+  and returns the current \texttt{Le} interpretation;
+\item \texttt{set\_outgoing\_length(length)} declares how many outgoing
+  bytes are prepared and constrains the writable outgoing slice to that
+  length.
+\end{itemize}
+
+These names are the intended public command-processing vocabulary. The
+kernel uses idiomatic Rust internally where useful, while the conceptual
+APDU interface is intentionally aligned with Java Card.
+The Rustlet runtime also provides \texttt{send\_bytes()} and
+\texttt{send\_bytes\_long()} as convenience operations layered on top of the
+same APDU buffer and outgoing-length declaration.
+
+This last point is the main \texttt{T=0} design constraint of the
+current implementation. A command is allowed to read incoming data and
+to prepare outgoing data in the same logical transaction, but the
+response bytes are never emitted directly by the handler itself.
+Instead, the base \texttt{T=0} manager checks two facts after command
+processing returns:
+
+\begin{itemize}
+\item whether the APDU object has prepared outgoing data;
+\item whether the same APDU has already consumed incoming data.
+\end{itemize}
+
+If outgoing data exists and no incoming payload was consumed, the base
+\texttt{T=0} manager sends the prepared bytes immediately and then appends
+\texttt{SW1/SW2}. If outgoing data exists and incoming data was
+consumed, the manager copies the response bytes into its own pending
+response buffer, returns a status word of the form \texttt{61xx}, and
+waits for a subsequent \texttt{GET RESPONSE} command. The deferred
+buffer is therefore owned by the \texttt{T=0} manager rather than by the
+\texttt{Apdu} object itself.
+
+The current \texttt{GET RESPONSE} recognition rule is intentionally
+small:
+
+\begin{itemize}
+\item \texttt{INS = C0};
+\item \texttt{P1 = 00};
+\item \texttt{P2 = 00}.
+\end{itemize}
+
+When such a command is received, the \texttt{T=0} manager handles it
+itself rather than forwarding it to command logic. The
+pending response buffer then emits up to the requested number of bytes
+and either:
+
+\begin{itemize}
+\item returns the final completion status when the buffered response has
+  been fully drained;
+\item or returns another \texttt{61xx} if additional response bytes
+  remain to be fetched.
+\end{itemize}
+
+In the current short-buffer implementation, a \texttt{GET RESPONSE}
+command with \texttt{Le = 00} is interpreted as a request for
+\texttt{256} bytes, matching the conventional \texttt{T=0} short-length
+encoding.
+
+The expected status values at this stage are therefore:
+
+\begin{itemize}
+\item \texttt{9000}: normal success, used when a command completes
+  without deferred response data, or after the last successful
+  \texttt{GET RESPONSE} chunk has been sent;
+\item \texttt{61xx}: response bytes are pending and must be retrieved by
+  \texttt{GET RESPONSE}; \texttt{SW2} carries the currently remaining
+  byte count, with \texttt{00} representing \texttt{256} remaining
+  bytes in the current fixed-buffer implementation;
+\item \texttt{6985}: conditions not satisfied; used when a
+  \texttt{GET RESPONSE} is received without any pending response, or
+  when another command is received while deferred response bytes are
+  still waiting to be fetched;
+\item \texttt{6D00}: instruction not supported; currently the default
+  result returned by \texttt{process\_apdu()} for all unimplemented
+  commands.
+\end{itemize}
+
+This yields three distinct completion paths:
+
+\begin{verbatim}
+// Direct outgoing path
+let le = apdu.set_outgoing();
+apdu.set_outgoing_length(response_len);
+let buffer = apdu.buffer_mut();
+buffer[..response_len].copy_from_slice(response_data);
+// T0ApduManager then appends SW1/SW2
+\end{verbatim}
+
+\begin{verbatim}
+// Deferred T=0 path
+apdu.set_incoming_and_Receive();
+let le = apdu.set_outgoing();
+apdu.set_outgoing_length(response_len);
+let buffer = apdu.buffer_mut();
+buffer[..response_len].copy_from_slice(response_data);
+// T0ApduManager stores the response, returns 61xx,
+// then waits for GET RESPONSE
+\end{verbatim}
+
+\begin{verbatim}
+// Wrong Le for a pure outgoing command
+let le = apdu.set_outgoing();
+apdu.set_outgoing_length(actual_len);
+// T0ApduManager compares requested Le and actual_len
+// and may return 6Cxx instead of the payload
+\end{verbatim}
+
+The detailed correspondence between these APDU-facing operations and the
+underlying \texttt{T=0} byte stream is summarized in
+Appendix~\ref{app:apdu-over-t0}.
+
+\section{Application Lifecycle Management}
+\label{sec:impl-lifecycle}
+
+Chapter~4 defines the lifecycle contract retained by Oxide SE. The reference
+kernel implements that contract at the object-registry boundary: every managed
+object carries a kind-specific lifecycle state, and APDU handlers consult that
+state before allowing the operation family that would make the object effective.
+
+The implemented state families are deliberately small:
+\begin{itemize}
+\item packages are \texttt{Loaded} or \texttt{Locked}; only
+      \texttt{Loaded} packages may be used by \texttt{INSTALL [for install]};
+\item ordinary instances are \texttt{Selectable} or \texttt{Locked}; only
+      \texttt{Selectable} instances may be selected;
+\item Security Domain instances are \texttt{Selectable} or \texttt{Locked};
+      only \texttt{Selectable} Security Domains may be selected or used to
+      establish a secure channel;
+\item key objects are \texttt{Active} or \texttt{Locked}; only
+      \texttt{Active} keys may be consumed by secure-channel establishment.
+\end{itemize}
+
+Deletion is represented by absence from the registry. Failed or interrupted
+deployment is represented by the absence of a newly committed registry entry.
+This avoids publishing half-created packages or instances as stable managed
+objects.
+
+\subsection{LOAD Command Handling}
+\label{sec:impl-load}
+
+The normative \texttt{INSTALL [for load]} and \texttt{LOAD} APDU shapes are
+described in Section~\ref{sec:gp-install-command}. The kernel implements them
+as one volatile dynamic-load transaction. \texttt{INSTALL [for load]} records
+the selected authority Security Domain, the target Security Domain, the package
+AID, the announced size, and the expected hash. It does not publish a package
+object in the registry.
+
+Each following \texttt{LOAD} command must target the same authority and arrive
+with the next expected block number in \texttt{P2}. The final block is marked
+by \texttt{P1}. The kernel rejects out-of-order blocks, size overflow beyond
+the announced length, authority mismatch, and final hash mismatch. Any APDU
+that is not part of the active load sequence cancels the volatile context.
+
+Only the final valid \texttt{LOAD} block commits the package as a registry
+object in state \texttt{Loaded}. Because the registry is mutated only at this
+final point, a reset or power loss during the load sequence falls back to the
+previous committed registry view.
+
+\subsection{INSTALL Command Handling}
+\label{sec:impl-install}
+
+The normative command family is described in
+Section~\ref{sec:gp-install-command}. This subsection only describes the
+reference-kernel path for the implemented \texttt{INSTALL [for install]} case:
+binding an already known package to a new selectable instance, optionally
+creating a Security-Domain instance, and initializing the Rustlet state that
+will later be serialized in the registry.
+
+The kernel accepts the \texttt{INSTALL [for install]} shape identified by
+\texttt{P1 = 0C} and \texttt{P2 = 00}. The command data is parsed as the
+GlobalPlatform length-value sequence:
+\begin{itemize}
+\item package AID;
+\item applet or module AID;
+\item application instance AID;
+\item privilege bytes;
+\item install parameters.
+\end{itemize}
+
+Empty package, applet, or instance AIDs are rejected, and the privilege field
+is bounded to the three-byte administrative form used by the Security-Domain
+model described in Chapter~4. Malformed LV data is rejected before any registry
+mutation or Rustlet call is attempted.
+
+The management authority is resolved before installation. A clear
+\texttt{INSTALL} command is interpreted under the root Security Domain
+authority, and is accepted only if that backend explicitly permits out-of-band
+management. A protected \texttt{INSTALL} command is interpreted under the
+Security Domain bound to the authenticated secure-channel session, after the
+unwrap path described in Section~\ref{sec:impl-scp-ext}. In both cases, the
+kernel asks the authority to approve the operation family before it mutates the
+registry. These checks cover Security-Domain and registry-plane access,
+management of the target package/applet/instance triple, making the target
+selectable, and the profile-specific installation policy hook.
+
+If the requested object is a kernel-native Security Domain instance, the
+kernel does not enter a Rustlet image. It creates the Security-Domain registry
+object directly, attaches it to the authority Security Domain through
+\texttt{parent\_sd\_aid}, and stores the encoded administrative state derived
+from the install privilege bytes. This is the path used for
+\texttt{NullSecurityDomain} and \texttt{KernelSecurityDomain} instances.
+
+Otherwise, installation targets a Rustlet package already present in the
+registry. The kernel resolves the package/applet pair in the active
+Security-Domain view, activates the selected Rustlet image as the new instance,
+and fills the shared Rustlet context with a compact LV payload containing the
+same package AID, applet AID, instance AID, privilege bytes, and install
+parameters. The Rustlet runtime receives that payload through its
+\texttt{install()} handler, as described in
+Section~\ref{sec:impl-rustlet-runtime}. The implementation deliberately avoids
+building a second transport APDU for this call; the installation payload is
+encoded directly into the shared Rustlet ABI buffer.
+
+After a successful Rustlet \texttt{install()} return, the kernel saves the
+instance state into the global object registry under the authority Security
+Domain. Ordinary Rustlet instances are stored as instance objects with
+serialized state. Rustlet-backed Security Domains additionally expose the
+Security-Domain dispatch vtable described in Section~\ref{sec:impl-sd-profiles}
+and keep their kernel-enforced privilege floor in the Security-Domain registry
+object. A failed install call, a failed authorization check, or a failed state
+save leaves no successfully selectable instance behind.
+
+At this layer, lifecycle handling is intentionally direct: successful package
+loading creates a \texttt{Loaded} package, successful installation creates a
+\texttt{Selectable} instance or Security Domain, and authorized
+\texttt{SET STATUS} commands lock or unlock those objects. \texttt{SELECT}
+itself only changes the current execution context.
+
+\subsection{DELETE Command Handling}
+\label{sec:impl-delete}
+% --- DELETE command handling ---
+% This subsection describes how the DELETE command is implemented.
+% It should cover:
+% - validation of AIDs to delete
+% - dependency checking (applications vs packages)
+% - prevention of deletion of active or selected applications
+% - registry update and consistency enforcement
+% - memory and resource reclamation
+% - rollback or failure handling
+
+\tbc
+
+\subsection{Lifecycle State Machine}
+\label{sec:impl-lifecycle-sm}
+
+The kernel stores lifecycle state inside the polymorphic object-registry
+payload, not in a parallel table. The state bits are persisted with registry
+entries, so a locked package, instance, Security Domain, or key remains locked
+after reboot when persistent storage is available.
+
+The current transition causes are:
+\begin{itemize}
+\item successful dynamic load commits a package as \texttt{Loaded};
+\item successful \texttt{INSTALL [for install]} commits a
+      \texttt{Selectable} ordinary instance or Security Domain;
+\item successful \texttt{PUT KEY} commits a key object as \texttt{Active};
+\item \texttt{DELETE} removes the addressed registry object after authority
+      and dependency checks;
+\item \texttt{SET STATUS} toggles packages, ordinary instances, and Security
+      Domains between their usable state and \texttt{Locked}.
+\end{itemize}
+
+The guards are checked where the protected operation starts. Package state is
+checked during package lookup for \texttt{INSTALL [for install]}; instance and
+Security Domain selectability is checked during \texttt{SELECT};
+Security-Domain selectability is checked before secure-channel establishment;
+key state is checked while resolving SCP03 key material.
+
+\texttt{SET STATUS} is handled as a management command. The APDU layer resolves
+the authority exactly as for other management operations: a protected command is
+interpreted under the Security Domain bound to the secure channel, while a
+clear command is interpreted under the root Security Domain. The target object
+must be reachable from that authority. Clear \texttt{SET STATUS} is accepted
+only when the authority explicitly permits it; this is true for
+\texttt{NullSecurityDomain} development images and false for kernel-native and
+Rustlet-backed production Security Domains. Rustlet-backed Security Domains
+receive a \texttt{set\_status()} authorization hook through the same dispatch
+bridge used by \texttt{INSTALL}, \texttt{DELETE}, \texttt{PUT KEY}, and
+\texttt{STORE DATA}.
+
+\subsection{GET STATUS Implementation}
+% --- GET STATUS implementation ---
+\label{sec:impl-get-status}
+
+The implementation parses only the modern GlobalPlatform TLV form described
+in Section~\ref{sec:gp-get-data-discovery}. The mandatory \texttt{4F} search
+criterion is canonicalized into a bounded AID value; the optional \texttt{5C}
+tag list is structurally validated. Unsupported object families or response
+formats fail before registry traversal.
+
+Traversal follows stable registry slot order. For every live slot, the kernel
+checks the requested family, AID prefix, lifecycle state and visibility from
+the active Security Domain authority. Package, ordinary-instance and
+Security-Domain objects are encoded directly as \texttt{E3} records in the
+APDU response buffer. Key and generic-data objects are never candidates.
+
+If the next matching record does not fit, the response ends with
+\texttt{63 10}. The continuation cursor contains only:
+
+\begin{itemize}
+\item the authority AID;
+\item the canonical query;
+\item the index of the next registry slot.
+\end{itemize}
+
+The next command must repeat that query with \texttt{P2 = 03}. A different
+query, a different authority, or any intervening non-\texttt{GET STATUS}
+command invalidates the cursor. This prevents continuation under a changed
+security context and avoids retaining a copy of any registry object.
+
+The encoder is allocation-free. It first computes the exact short BER-TLV
+record length, then writes directly into the remaining APDU payload. Thus
+pagination is determined by the transport capacity rather than by an
+intermediate response array.
+
+% --- Cryptographic primitive layer ---
+% This section describes:
+% - minimal crypto API exposed by core
+% - opaque AES key representation
+% - in-place buffer-oriented operations
+% - target-specific hardware hooks
+% - software fallback strategy
+\section{Cryptographic Primitive Backend}
+\label{sec:impl-crypto-backend}
+
+Before discussing key storage and SCP03 session handling, the reference
+implementation needs a small cryptographic primitive layer. This layer is not
+meant to expose a large application-facing crypto API. Its role is narrower:
+to provide the primitive operations required by SCP03 and by platform key
+management, while keeping the implementation compatible with constrained
+embedded targets and with future hardware-assisted ports.
+
+The current design therefore adopts three explicit choices.
+
+First, the public API is buffer-oriented and keeps allocation out of the
+cryptographic path. Command processing and secure-channel wrapping already
+operate on preallocated APDU buffers, so the crypto layer should follow the
+same model.
+
+Second, AES keys are represented through an opaque \texttt{AesKey} type. The
+caller can construct such a key from raw bytes, but does not manipulate the
+internal representation directly. This leaves room for later target-specific
+formats, key-slot indirections, or hardware key handles without changing the
+higher-level SCP03 code.
+
+Third, the backend selection is intentionally asymmetric:
+\begin{itemize}
+\item a target-specific hardware implementation should be preferred whenever a
+  serious port exposes constant-time AES support or a dedicated cryptographic
+  peripheral;
+\item a software implementation must remain available as a fallback, both for
+  boards without accelerators and for bring-up under emulation.
+\end{itemize}
+
+For the current project stage, the minimal API retained in \texttt{core} is:
+\begin{itemize}
+\item \texttt{fill\_random(buf)} for entropy or challenge generation;
+\item \texttt{aes\_cbc\_encrypt\_in\_place(key, iv, buf)} for block-aligned
+  in-place encryption;
+\item \texttt{aes\_cbc\_decrypt\_in\_place(key, iv, buf)} for block-aligned
+  in-place decryption;
+\item \texttt{aes\_cmac(key, input, out)} for CMAC computation;
+\item \texttt{scp03\_kdf(...)} for the SCP03 session-derivation path, with the
+  derivation constant, context, and output buffer provided explicitly by the
+  caller.
+\end{itemize}
+
+The in-place form of the CBC helpers is deliberate. In a constrained runtime,
+it is highly desirable that input and output may be the same buffer. This keeps
+the interface close to the APDU transport model and avoids needless scratch
+buffers when wrapping or unwrapping secure messages.
+
+The current reference implementation also assumes that the present QEMU targets
+do not expose a cryptographic accelerator usable by the project at this stage.
+As a consequence, the portable fallback path is the relevant one for current
+development and test environments.
+
+The runtime distinguishes explicitly between the board itself and the
+execution environment. The build flow injects:
+\begin{itemize}
+\item \texttt{OXIDE\_SE\_BOARD} to select the supported target board;
+\item \texttt{OXIDE\_SE\_EXECUTION\_ENV} to distinguish a hardware-oriented build
+  from a QEMU-oriented one.
+\end{itemize}
+
+This second dimension matters because some services depend on the actual
+execution context rather than on the nominal board identity alone. The same
+\texttt{STM32F405} board support, for instance, should use the on-chip RNG on
+real hardware but must not assume that the corresponding QEMU model exposes
+that peripheral.
+
+Among available open implementations, the RustCrypto AES crate is a credible
+reference for that fallback path \cite{rustcrypto-aes}. Its public
+documentation states that its implementations are designed to execute in
+constant time, either through hardware intrinsics when available or through a
+portable bitsliced backend otherwise. This does not eliminate the need for
+review, integration discipline, and platform-specific testing, but it provides
+a reasonable software baseline for the present project stage.
+
+The random-generation path is treated more conservatively than the AES path.
+For entropy generation, the project does not currently accept a purely
+deterministic software fallback with no external entropy source. The NIST
+\texttt{SP 800-90} family explicitly separates the role of entropy sources from
+that of deterministic generators: a DRBG construction is expected to be fed by
+an entropy source rather than to replace it \cite{nist80090b,nist80090c}. For
+that reason, the default behavior of \texttt{fill\_random()} remains an
+explicit error whenever no credible entropy source has been wired for the
+current target.
+
+For the supported STM32 hardware targets, the intended production path is to
+use the on-chip RNG peripheral directly. Both STM32F405 and STM32L475 expose a
+dedicated RNG block with a control register, a status register, and a data
+register. The usage pattern is straightforward:
+\begin{itemize}
+\item initialize the peripheral once during the crypto-backend startup path;
+\item enable the appropriate clock source for the target;
+\item enable the RNG peripheral;
+\item wait until the data-ready flag indicates that a fresh 32-bit word is
+  available;
+\item read the data register;
+\item reject or reinitialize on hardware entropy error flags.
+\end{itemize}
+
+In practice, the generation latency documented by ST is on the order of a few
+dozen peripheral clock cycles per 32-bit word, which is small enough that the
+reference design does not currently require any software ``diversification'' or
+PRNG expansion layer on top of the hardware output. A simple implementation may
+therefore block until the status bit becomes ready and then return the newly
+read word. A more optimized implementation may keep one prefetched word in
+flight in order to overlap the wait for the next sample, but this remains an
+optimization of the same basic hardware-driven design.
+
+The QEMU situation is different. The currently used STM32 board models do not
+provide the corresponding RNG device \cite{qemu-stm32}. The present
+implementation therefore does not try to emulate a fake TRNG in software.
+Instead, QEMU-oriented builds use a distinct development path selected through
+\texttt{OXIDE\_SE\_EXECUTION\_ENV=qemu}: \texttt{fill\_random()} is serviced through
+semihosting file access to the host \texttt{/dev/urandom}. This keeps the
+development path explicit and separate from the production hardware path, while
+avoiding the introduction of an ad hoc software-only generator inside the
+guest.
+
+This QEMU-only entropy bridge should not be confused with a production entropy
+source. It is a bring-up facility that depends on host cooperation and on the
+availability of semihosting. The default policy for unsupported environments
+still remains an explicit error rather than a silently invented random stream.
+
+More generally, the existence of a QEMU execution mode must not be read as a
+security claim about the emulated target. The current QEMU path is a prototype
+and validation aid. It is intentionally useful for debugging, but precisely for
+that reason it relies on mechanisms that are inappropriate as part of a secure
+deployment story. In particular, semihosting gives the guest controlled access
+to host services and is explicitly documented by QEMU as a development-oriented
+facility rather than as an isolation-preserving boundary
+\cite{qemu-security,qemu-semihosting}. The QEMU runtime is therefore a
+convenience environment for bring-up and test, not a substitute for the
+security properties expected from the real hardware platform.
+
+This mirrors another already known limitation of the current QEMU bring-up,
+namely the lack of usable flash support in the emulated environment.
+
+From an architectural point of view, this section should be read as a lower
+layer than the next two ones:
+\begin{itemize}
+\item the key-management layer decides how static SCP03 keys are stored,
+  versioned and updated;
+\item the secure-channel layer consumes those keys and invokes the primitive
+  backend to derive \texttt{S-ENC}, \texttt{S-MAC}, and \texttt{S-RMAC}, then
+  to compute \texttt{C-MAC}, \texttt{R-MAC}, and protected payloads.
+\end{itemize}
+
+In a mature hardware port, the same high-level API should therefore dispatch to
+target hooks that exploit the actual silicon capabilities, while preserving the
+software fallback for development, unsupported boards, and test environments.
+
+% --- Key management and secure storage ---
+% This section describes:
+% - internal representation of keys (key sets, versions, identifiers)
+% - secure storage mechanisms
+% - key update policies (PUT KEY)
+% - diversification and derivation
+% - protection against leakage
+\section{Key Management and Secure Storage}
+\label{sec:impl-key-management}
+
+The current implementation uses the global registry for resident packages,
+application instances, Security Domain instances, and cryptographic key
+objects attached to those Security Domains. At the time of writing, the first
+implemented key-object family is SCP03 static communication keys.
+
+This means that the registry stores four broad classes of objects:
+\begin{itemize}
+\item packages carrying executable binary code;
+\item ordinary application instances carrying serialized state;
+\item Security Domain instances and their administrative state;
+\item typed key objects attached to a Security Domain instance, currently
+      SCP03 static keys.
+\end{itemize}
+
+For these ancillary key objects, the ownership rule is the same as for other
+managed entities: each object is attached to one owning Security Domain
+instance through \texttt{parent\_sd\_aid}. Key metadata is held in dedicated
+registry fields, while the payload contains the raw key bytes consumed by the
+secure-channel implementation.
+
+In the current subset, one SCP03 key object records:
+\begin{itemize}
+\item a key-version number;
+\item a key identifier / keyset identifier;
+\item a usage selector (\texttt{ENC} or \texttt{MAC});
+\item a key state, currently \texttt{Active} or \texttt{Locked};
+\item one AES-128 static key value.
+\end{itemize}
+
+The current \texttt{PUT KEY} implementation therefore behaves as follows:
+\begin{itemize}
+\item the active Security Domain authorizes the command through the normal
+      management boundary;
+\item the kernel decodes the GlobalPlatform reference controls: the low seven
+      bits of \texttt{P1} carry the key version, the high bit of \texttt{P1}
+      carries the last-command flag, the low seven bits of \texttt{P2} carry
+      the first key identifier, and the high bit of \texttt{P2} indicates
+      whether the command contains several keys;
+\item the kernel parses the payload entries
+      \texttt{(usage, key\_len, key\_bytes)};
+\item each accepted entry is stored as one serialized registry object attached
+      to the active Security Domain instance;
+\item when several payload entries are present, their effective key
+      identifiers increment from the first identifier decoded from
+      \texttt{P2};
+\item storing an already existing
+      \texttt{(parent\_sd\_aid, key\_version, key\_id, usage)} tuple rotates
+      the key material by replacing the registry object atomically;
+\item later \texttt{INITIALIZE UPDATE} resolves the requested
+      \texttt{(key\_version, key\_id)} pair by reading back the corresponding
+      \texttt{ENC} and \texttt{MAC} objects from the registry and rebuilding
+      the \texttt{StaticKeys} structure consumed by the pure SCP03 engine.
+\end{itemize}
+
+\texttt{Locked} key objects remain present in the registry for policy and
+audit-oriented evolution, but they are ignored by SCP03 session derivation.
+Deletion helpers operate on the same owner-qualified tuple, so deleting one
+usage or keyset member cannot remove a sibling Security Domain's key.
+
+This storage rule is shared by both secure backends currently implemented in
+Oxide SE:
+\begin{itemize}
+\item kernel-native Security Domains resolve those registry-backed key objects
+      directly inside the kernel;
+\item Rustlet-backed Security Domains reached through
+      \texttt{RustletSecurityDomainProxy} load the same key objects through
+      runtime syscalls and derive their SCP03 sessions in user-land.
+\end{itemize}
+
+Two consequences are important:
+\begin{itemize}
+\item SCP03 static key material is stored as Security Domain-owned registry
+      objects;
+\item identical \texttt{(key\_version, key\_id, usage)} tuples may exist in
+      several Security Domain subtrees, because the corresponding key objects
+      are qualified by \texttt{parent\_sd\_aid}.
+\end{itemize}
+
+This organization keeps an important implementation invariant intact:
+cryptographic material is not hidden in ad hoc side tables unrelated to the
+registry model. The registry remains the common persistence and authority
+surface for applications, Security Domains, and the ancillary objects they
+own.
+
+For the root kernel-native Security Domain, the bootstrap path already inserts
+the static SCP03 key objects explicitly declared under \texttt{root.keys} in
+the build manifest. Supplementary Security Domains use the equivalent
+\texttt{security\_domains.keys} declaration. The very first
+\texttt{INITIALIZE UPDATE} therefore consumes registry-backed key material
+rather than a side-loaded session secret, and a manifest without keys receives
+no implicit development fallback. The same registry model is also used by the
+Rustlet-backed Security Domain path; its difference is not the storage model,
+but where session derivation is executed.
+
+The remaining work in this area is not the existence of registry-backed keys
+themselves, but the richer GlobalPlatform policy surface around them:
+additional usages, rotation semantics, diversification, production
+provisioning, and the final policy for first-key provisioning of supplementary
+Security Domain instances.
+
+
+\section{Secure Channel Implementation}
+\label{sec:impl-scp}
+
+Oxide SE implements secure channels as a kernel-mediated protocol stack whose
+active Security Domain backend may be kernel-native or Rustlet-backed. The
+current implementation is intentionally split into four layers:
+
+\begin{itemize}
+\item protocol-specific pure cryptographic engines
+      (\texttt{core::scp03}, \texttt{core::scp11}) with no dependency on APDU
+      routing, registry state, or Security Domain policy;
+\item \texttt{core::gp\_sm}, which centralizes the bounded payload budgets
+      imposed by Amendment~D command and response MAC trailers;
+\item the active Security Domain backend, which owns policy decisions, static
+      keys, session lifecycle, and secure-messaging state;
+\item \texttt{SecureChannelLayer}, which owns the APDU boundary: command
+      interception, command unwrapping, response wrapping, and management
+      command authorization for the supported SCP profiles.
+\end{itemize}
+
+This split is the main implementation invariant. Cryptographic transforms are
+not scattered through the APDU dispatcher, and the cryptographic core does not
+know how an AID is installed, selected, or stored in the registry.
+
+The active backend may take three forms:
+\begin{itemize}
+\item a pseudo-Security-Domain path (\texttt{NullSecurityDomain}) for bring-up
+      and test scenarios;
+\item a kernel-native Security Domain path (\texttt{KernelSecurityDomain});
+\item a Rustlet-backed Security Domain path reached through
+      \texttt{RustletSecurityDomainProxy}.
+\end{itemize}
+
+In every case, the secure-channel session is associated with one Security
+Domain instance and one logical channel. The current implementation still
+provides only one effective channel, but the authority boundary is already
+framed in those terms rather than as a single process-global SCP state.
+
+\subsection{Security Domain Profiles}
+\label{sec:impl-sd-profiles}
+\label{sec:impl-scp-profiles}
+
+The default management selector is configured by the predeployment manifest.
+The root Security Domain backend is declared under \texttt{[root.package]},
+while the secure-channel protocols compiled into the image are declared under
+\texttt{[secure\_channel]}. Three Security Domain backends are currently
+accepted:
+
+\begin{itemize}
+\item \texttt{NullSecurityDomain}, a no-security/debug authority that
+      authorizes management operations and does not establish SCP sessions;
+\item \texttt{KernelSecurityDomain}, a kernel-native Security Domain whose
+      supported SCP profiles are selected by \texttt{protocols},
+      \texttt{scp03\_profile}, and \texttt{scp11\_profiles};
+\item \texttt{RustletSecurityDomainProxy}, a kernel-side proxy that delegates
+      Security-Domain policy and SCP state to one selected Rustlet Security
+      Domain instance while preserving kernel-owned base privileges.
+\end{itemize}
+
+The S8 and S16 variants are explicit secure-channel profiles rather than
+distinct administrative authorities. A manifest that enables SCP03 therefore
+declares \texttt{scp03\_profile = "S8"} or
+\texttt{scp03\_profile = "S16"}. A manifest that enables only SCP11 omits the
+SCP03 profile entirely and declares its supported SCP11 variants through
+\texttt{scp11\_profiles}, for example \texttt{["A", "C"]}. The internal engine
+is shared, and one \texttt{KernelSecurityDomain} implementation exposes the
+same \texttt{SecurityDomainManagement} and
+\texttt{SecurityDomainSecureChannel} traits regardless of the selected SCP
+combination.
+
+The proxy variant keeps those same kernel-side traits and APDU boundaries, but
+forwards the dedicated Security-Domain operations through \texttt{sddispatch}
+to the currently selected Rustlet Security Domain instance. The kernel still
+owns APDU parsing, registry mutation, non-escalation checks, and active-context
+tracking; the Rustlet Security Domain refines policy and performs its own SCP
+cryptography through the runtime APIs.
+
+\subsection{Selected Secure-Channel Security Levels}
+\label{sec:impl-scp-selected-levels}
+
+The reference implementation deliberately selects a strict subset of the
+normative security-level matrices described in Chapter~3. This is a build and
+interoperability profile, not a redefinition of the GlobalPlatform values.
+
+For SCP03, \texttt{EXTERNAL AUTHENTICATE} accepts only
+\texttt{P1 = 00}, \texttt{01}, or \texttt{03}: authenticated session without
+secure messaging, C-MAC, or C-MAC with C-ENC. The response-protection levels
+\texttt{11}, \texttt{13}, and \texttt{33} are rejected explicitly with
+\texttt{6985}. Consequently, responses in the selected SCP03 profile remain
+plain; the optional \texttt{BEGIN R-MAC SESSION} and
+\texttt{END R-MAC SESSION} commands are profiled out and return
+\texttt{6D00}.
+
+For SCP11a, SCP11b, and SCP11c, the CRT accepts only key-usage qualifier
+\texttt{95 01 3C}, selecting C-MAC, C-ENC, R-MAC, and R-ENC. The GP-defined
+\texttt{34} alternative is rejected for all three variants; the SCP11c-only
+\texttt{1C} and \texttt{74} alternatives are rejected as well. SCP11 does not
+define the explicit R-MAC session companion commands: response protection is
+part of the security level established by the CRT.
+
+The authenticated-peer class is also part of the selected profile and is
+applied before any Security Domain hook:
+\begin{itemize}
+\item SCP03 and owner-authenticated SCP11a may carry the implemented
+      management command families;
+\item SCP11b authenticates the card, not the OCE, and is consequently limited
+      to read-only \texttt{GET DATA} in this implementation profile;
+\item owner-authenticated SCP11c permits the implemented management families
+      except \texttt{PUT KEY}, \texttt{SET STATUS}, and deletion of key
+      objects, as required by the SCP11c restrictions;
+\item SCP11c \texttt{ANY\_AUTH} permits \texttt{GET DATA} only. Mutating
+      operations requiring the \texttt{BF20} authorization object are
+      explicitly profiled out.
+\end{itemize}
+This matrix is a non-overridable kernel gate. The selected Security Domain's
+hierarchy, privilege checks, and management hooks are then evaluated for every
+accepted command and may only narrow the decision.
+
+The implementation also supports a supplementary-protocol fallback. A
+secure-channel protocol selected in the build manifest always has priority and
+uses the kernel matrix above. If no selected kernel profile recognizes an
+establishment command, the active Rustlet Security Domain may explicitly claim
+the header and process the raw establishment data. The resulting session is
+recorded as Rustlet-owned without assigning it a fictitious SCP identifier.
+Protocol-specific authorization is then owned by that Security Domain, but
+registry ancestry, privilege non-escalation, lifecycle checks, APDU bounds, and
+management-family hooks remain enforced by the kernel. This extension point
+therefore permits supplementary protocols without turning the registry into
+Rustlet-controlled memory.
+
+These choices are enforced before a session becomes authenticated. Host-based
+tests exhaustively reject every other byte value, while QEMU scenarios exercise
+the accepted levels and representative GP-defined but profiled-out values at
+the APDU boundary.
+
+S8 uses 8-byte host/card challenges, 8-byte authentication cryptograms, and
+8-byte C-MAC/R-MAC values. S16 uses 16-byte challenges, 16-byte cryptograms,
+and 16-byte MAC values. The APDU layer therefore never assumes a fixed
+protected-command trailer shape. It asks the active Security Domain for the
+current MAC length and session policy before separating the raw payload from
+its trailing MAC.
+
+Separately from these kernel-native profiles, Oxide SE also supports a
+Rustlet-backed Security Domain path. In that case, the kernel still owns APDU
+interception and routing, but the selected Security Domain instance performs
+secure-channel operations through the Rustlet runtime and the generated
+\texttt{sddispatch} entry.
+
+\subsection{Pure SCP03 Engine}
+\label{sec:impl-scp-core}
+
+The pure engine in \texttt{core::scp03} defines:
+
+\begin{itemize}
+\item \texttt{Scp03Profile}, with profile-dependent lengths for S8 and S16;
+\item \texttt{StaticKeys}, currently AES-128 ENC and MAC test keys;
+\item \texttt{SessionKeys}, containing S-ENC, S-MAC, and S-RMAC;
+\item \texttt{SessionMaterial}, produced by one
+      \texttt{INITIALIZE UPDATE};
+\item \texttt{SessionState}, which owns MAC chains and encryption counters for
+      secure messaging;
+\item \texttt{SecurityLevel}, which represents no secure messaging, SCP03
+      command-only protection, and the full bidirectional protection selected
+      for SCP11.
+\end{itemize}
+
+The engine derives session material from the static keys, host challenge and
+card challenge using the SCP03 KDF. It then computes card and host
+cryptograms, verifies the host cryptogram during authentication, validates
+C-MAC on protected commands, decrypts C-ENC command data, and provides the
+R-MAC/R-ENC primitives used by the common SCP11 secure-messaging path. The
+selected SCP03 levels do not activate response protection; the exact selected
+matrix is stated in Section~\ref{sec:impl-scp-selected-levels}.
+
+The current implementation uses AES-CMAC and AES-CBC style encryption with
+GlobalPlatform padding rules. SCP03 itself remains a symmetric protocol here:
+asymmetric authentication, post-quantum key establishment, or card certificate
+handling would be higher-level platform services, not requirements of the
+current SCP03 core.
+
+\subsection{APDU Layer Integration}
+\label{sec:impl-scp-apdu-layer}
+
+\texttt{SecureChannelLayer} sits above the T=0 APDU manager. It sees clear APDUs
+after T=0 procedure-byte handling, but before Rustlet dispatch or management
+mutation. Its responsibilities are:
+
+\begin{itemize}
+\item intercept \texttt{INITIALIZE UPDATE} and call the active Security
+      Domain's secure-channel entry point;
+\item intercept \texttt{EXTERNAL AUTHENTICATE}, verify the host cryptogram,
+      and open the requested security level;
+\item intercept \texttt{PERFORM SECURITY OPERATION} and
+      \texttt{MUTUAL AUTHENTICATE} for SCP11-capable backends;
+\item reject protected commands if no authenticated secure-channel session
+      exists;
+\item split protected command data into its raw payload and trailing
+      profile-dependent C-MAC;
+\item ask the Security Domain to unwrap protected command data before command
+      dispatch;
+\item ask the Security Domain to protect response data, append the R-MAC when
+      required, and retain the actual status word before transmission.
+\end{itemize}
+
+Management commands such as \texttt{INSTALL [for install]} are still parsed and
+executed by the kernel. The Security Domain authorizes them. With
+\texttt{NullSecurityDomain}, this authorization is deliberately open for debug
+and bootstrap scenarios. With \texttt{KernelSecurityDomain}, mutating
+management commands require an
+authenticated encrypted SCP03 session. The kernel-native Security Domain path
+keeps a small per-instance administrative state keyed by instance
+AID. At this stage that state serializes the privilege bitfield carried by
+\texttt{INSTALL}, seeds the implicit root instance with the bootstrap privilege
+set, and lets the kernel preserve kernel-owned administrative privilege state
+without relying on a Rustlet serializer.
+
+More generally, Security Domain instances are modeled as objects of the global
+registry. Each such object may carry a \texttt{parent\_sd\_aid} and a
+serialized administrative state. For a Rustlet-backed Security Domain, that
+state is split between kernel-owned authority data and Rustlet-owned persistent
+functional state. For \texttt{NullSecurityDomain} and kernel-native profiles,
+the persistent administrative state may reduce to privilege bits. Active
+secure-channel state remains volatile in every backend.
+
+\subsection{Persistent Security-Domain State and Volatile Sessions}
+\label{sec:impl-scp-state-lifetime}
+
+The lifetime of Security-Domain configuration is distinct from the lifetime of
+an authenticated secure-channel session. Registry-backed persistent state may
+contain lifecycle, privileges, application policy, certificate references, or
+other long-lived configuration. It shall not contain derived session keys,
+expected cryptograms, receipts, command or response MAC chains, encryption
+counters, or partially staged handshake buffers.
+
+A Rustlet Security Domain expresses this boundary in its serialized Rust type.
+Its secure-channel field is marked \texttt{\#[serde(skip)]} and implements
+\texttt{Default}. The runtime deserializes the object when the Security Domain
+FAE is loaded. The resulting Rust value remains alive in RAM while that
+Security Domain is loaded, so consecutive establishment and protected APDUs
+observe the same live session. The active Rustlet Security Domain remains
+resident in a dedicated firmware slot while an ordinary selected Rustlet
+occupies the application slot. The \texttt{unwrap}, application-dispatch, and
+\texttt{wrap} calls therefore alternate between two live instances rather than
+unloading and restoring the Security Domain through the registry. After each
+successful \texttt{sddispatch} call, the runtime serializes only the persistent
+view and publishes it through the registry. It does not reload persistent state
+before every APDU.
+
+Unloading, rebooting, or later reloading the Security Domain reconstructs the
+skipped session field at its inactive default. An earlier Postcard encoding
+that still carries trailing session bytes may be decoded for migration, but
+those bytes are ignored and never reactivate the old channel.
+
+Explicit \texttt{reset\_secure\_channel()} remains mandatory. A new
+establishment exchange, a terminating clear command, or another session-ending
+condition may occur while the Security Domain remains loaded. Reset therefore
+overwrites all volatile secrets, chains, counters, cryptograms, receipts, and
+staged handshake data immediately; session termination never relies on a
+future deselection. Persistent mutations are still committed after successful
+calls rather than being deferred until \texttt{DESELECT}, because power may be
+lost before such a command occurs.
+
+\subsection{Validation Strategy}
+\label{sec:impl-scp-validation}
+
+Validation is deliberately split into two levels. Pure cryptographic regression
+tests validate deterministic SCP03 transformations for S8 and S16. QEMU
+integration tests validate that those transformations are correctly connected
+to APDU parsing, Security Domain policy, registry mutation, and Rustlet
+execution.
+
+The detailed vector files, their OpenSCDP/GlobalPlatformPro and Samsung
+OpenSCP-Java provenance, and the exact test flows are documented in
+Appendix~\ref{app:scp03-vectors}. The
+important implementation point here is that the kernel does not treat S8/S16
+as test-only constants: profile-dependent lengths are part of the active
+Security Domain state and are consumed by the APDU secure-channel layer.
+
+\subsection{Remaining Certification Gap}
+\label{sec:impl-scp-certification-gap}
+
+The implementation is structured for auditability, but it is not a claim of
+GlobalPlatform certification. Appendix~\ref{app:scp03-vectors} documents the
+current independent regression evidence. The remaining work includes:
+
+\begin{itemize}
+\item defining a secure production provisioning policy for the initial keys
+      currently declared by development manifests;
+\item validating ICV, chaining, counter and error behavior against official
+      certification material if it becomes available to the project;
+\item completing key-set lifecycle policy beyond the current registry-backed
+      \texttt{PUT KEY} path, including production provisioning, rotation
+      governance and diversification rules.
+\end{itemize}
+
+\section{Registry and Data Management}
+\label{sec:impl-registry}
+% --- Internal registry and data access ---
+% This section describes:
+% - internal representation of registry (AIDs, domains, privileges)
+% - GET DATA / STORE DATA handling
+% - persistence model
+% - consistency guarantees
+
+\subsection{GlobalPlatform Discovery Objects}
+\label{sec:impl-gp-discovery}
+
+The APDU layer resolves \texttt{GET DATA 0066} and \texttt{0067} through the
+Security Domain that is authoritative for the command. Clear discovery uses
+the root Security Domain; protected discovery uses the Security Domain bound
+to the active secure channel.
+
+\texttt{NullSecurityDomain} emits a complete \texttt{66/73} recognition
+structure but no \texttt{64} SCP declaration, and reports
+\texttt{GET DATA 0067} as absent with \texttt{6A88}.
+\texttt{KernelSecurityDomain} constructs both objects from the effective build
+configuration: only compiled and enabled SCP03 and SCP11 profiles are
+advertised. SCP11 always advertises S16, while SCP03 reports its configured S8
+or S16 option.
+
+A Rustlet-backed Security Domain answers through its \texttt{get\_data} hook.
+The runtime default constructs the same standards-compliant objects from the
+SCP03 S8/S16 and SCP11a/b/c support methods. A Rustlet may override
+\texttt{get\_data} for richer domain-specific data. If it advertises no
+protocol, the proxy does not substitute the kernel's capabilities: discovery
+describes the selected Security Domain, not the firmware in general.
+
+All discovery objects are encoded directly in the APDU response buffer by a
+bounded BER-TLV writer. No registry object, key bytes, certificate, or
+intermediate response array is exposed or retained.
+
+The firmware keeps one kernel-owned object registry. This registry is the
+implementation counterpart of the GlobalPlatform object model described in
+Chapter~4: it is the single catalogue for packages, application instances,
+Security Domain instances, and ancillary objects such as secure-channel keys.
+Security Domains do not own private registries. Instead, every registry object
+is attached to an administrative Security Domain through
+\texttt{parent\_sd\_aid}.
+
+Each registry entry has a small common header:
+\begin{itemize}
+\item \texttt{object\_aid}, the AID by which the object is addressed;
+\item \texttt{parent\_sd\_aid}, the Security Domain instance under whose
+  administrative authority the object lives;
+\item \texttt{kind}, which distinguishes the concrete object family.
+\end{itemize}
+
+The object kind determines the payload shape:
+\begin{itemize}
+\item a \textbf{package} object uses its \texttt{object\_aid} as the
+  executable-load-file AID and carries the FAE binary image;
+\item an \textbf{application instance} records the package AID from which it
+  was instantiated and carries the serialized application state;
+\item a \textbf{Security Domain instance} records the package or backend that
+  implements it, the three-byte administrative privilege field, and its
+  serialized administrative state;
+\item a \textbf{key} object records key metadata such as version, identifier,
+  usage, type and length, together with the raw key material.
+\end{itemize}
+
+The root Security Domain is not kept outside this structure. It is created by
+the predeployment manifest as a real Security Domain instance with no parent,
+using the backend declared under \texttt{[root.package]} and the instance AID
+and installation bytes declared under \texttt{[root.instance]}. A development
+image may use \texttt{NullSecurityDomain}; a protected image may use
+\texttt{KernelSecurityDomain} or a Rustlet-backed Security Domain. In all
+cases, the root follows the same registry shape as supplementary Security
+Domains.
+
+Registry lookup is authority-aware. A raw global lookup exists only inside the
+kernel for consistency checks and bootstrap. Management operations resolve AIDs
+through the active Security Domain view: the selected or secure-channel-bound
+Security Domain sees itself, objects attached to it, and objects attached to
+descendant Security Domains. Objects outside that subtree are treated as absent
+for that administrative operation. This is the implementation form of the
+visibility rule described in Section~\ref{sec:gp-object-relationships}.
+
+Privilege delegation is checked before a Security Domain instance is created or
+updated. The three-byte privilege field is kernel-owned authority data: a
+Rustlet-backed Security Domain may receive the installation payload and keep
+additional serialized policy state, but it cannot broaden the base
+GlobalPlatform privileges that the kernel recorded for the instance. A child
+Security Domain must therefore have a privilege set no broader than what its
+parent is allowed to delegate.
+
+Persistence is deliberately expressed at the registry-object level. Packages,
+instances, Security Domains, and keys are the units that must eventually be
+written atomically to non-volatile storage. Until the persistent backend is
+implemented, the predeployment manifest rebuilds the initial registry at boot.
+Once non-volatile storage is available, the same registry-object model remains
+the unit of recovery: a management operation either installs, updates, or
+deletes a complete registry object consistently, or it leaves the previous
+registry state intact.
+
+\section{Logical Channel and Context Management}
+\label{sec:impl-channel}
+% --- Logical channels and execution context ---
+% This section describes:
+% - channel allocation (MANAGE CHANNEL)
+% - mapping channel → selected application
+% - SELECT command handling
+% - context switching model
+
+The current kernel implements only the minimal selected-context model
+required to bootstrap an embedded administrative application. In
+GlobalPlatform terms, this is deliberately only the beginning of the
+logical-channel story: there is one effective channel, one selected
+context slot in the kernel, and no \texttt{MANAGE CHANNEL}
+implementation yet.
+
+At this stage, the selected context is not a high-level Rust object but
+an explicit kernel-owned record containing:
+\begin{itemize}
+\item the application-global-pointer value returned by the loaded FAE
+  image;
+\item an opaque application state pointer;
+\item a pointer to a C-style vtable containing the application entry
+  points.
+\end{itemize}
+
+This representation is intentional. The kernel image and the loaded FAE
+image are two distinct position-independent binaries, each with its own
+global-pointer context. A native Rust \texttt{\&dyn Trait} would not be
+an appropriate boundary here, because the call path must explicitly
+switch to the application's relocation context before entering its code
+and must restore the kernel context on return.
+
+\subsection{Selected Context and Embedded Administrative Application Activation}
+\label{sec:impl-selected-context}
+
+The selected application is drawn from Rustlets packaged as independent FAE
+images and declared by the predeployment manifest. Each registry package and
+instance uses three GlobalPlatform-style identifiers:
+\begin{itemize}
+\item a \textbf{package AID}, corresponding to the executable load file;
+\item an \textbf{applet AID}, corresponding to the installable module;
+\item an \textbf{instance AID}, corresponding to the selectable live
+  instance.
+\end{itemize}
+
+Test manifests may assign the same value to these three AIDs for compact
+scenarios. They remain distinct identifiers in the registry and follow the
+GlobalPlatform identification model.
+
+The \texttt{SELECT} command remains kernel-owned. The transport loop
+detects \texttt{INS = A4} before generic dispatch, requests the command
+payload, interprets it as an instance AID, and compares it against the
+kernel registry. If no entry matches, the kernel returns \texttt{6A82}
+(file not found). If a matching entry exists, the kernel activates the
+corresponding embedded FAE and records that instance as the current
+selected context.
+
+This activation follows the XiPFS FAE execution model rather than a
+kernel-specific reinvention of the startup runtime. The kernel enters
+the embedded image at offset \texttt{0}, thereby using the existing
+XiPFS startup code unchanged. The startup path relocates the FAE image
+into the application RAM arena and yields the information required to
+call the application \texttt{start} entry point.
+
+The kernel-side activation path therefore has two distinct steps:
+\begin{enumerate}
+\item run the FAE loader to relocate the image and obtain the
+  application entry point together with the application global-pointer
+  state;
+\item call the application's \texttt{start(buffer)}
+  function and validate the returned selected-application descriptor.
+\end{enumerate}
+
+The \texttt{buffer} currently contains the shared ABI buffer used to
+carry the ABI version, APDU header fields, status word and payload. The
+descriptor returned by \texttt{start()} contains:
+\begin{itemize}
+\item the ABI version expected by the application;
+\item the current instance AID as seen from the Rustlet runtime;
+\item an opaque application state pointer;
+\item a vtable with two entry points:
+  \texttt{install()} and \texttt{process\_apdu()}.
+\end{itemize}
+
+On the application side, the current ABI is intentionally minimalist.
+An application declares one resident state type and one installation
+function, then exports them through:
+
+\begin{verbatim}
+struct SecurityDomain;
+declare_rustlet!(SecurityDomain, 1024usize, install);
+\end{verbatim}
+
+The \texttt{declare\_rustlet!} macro hides the internal runtime
+boilerplate in \texttt{rustlet\_runtime}. The
+application author therefore only needs to provide:
+\begin{itemize}
+\item the concrete state type later used by
+  \texttt{process\_apdu()};
+\item an \texttt{install()} function that constructs this state;
+\item the \texttt{process\_apdu()} implementation itself.
+\end{itemize}
+
+Only after these checks does the kernel update its single selected
+context slot. This is the precise meaning of selection in the current
+implementation: \texttt{SELECT} does not install the application, does
+not invoke the \texttt{install()} callback, and does not yet grant a
+general execution mode. It merely resolves an AID to an embedded
+administrative application, loads that application, and records it as
+the selected execution context for subsequent command dispatch.
+
+The later command path then uses kernel-side trampolines to enter the
+selected application. These trampolines load the application's
+global-pointer context before the callback and restore the kernel state
+after the callback returns. This context-switching rule is the critical
+mechanism that allows the kernel and the selected FAE image to coexist
+without treating the application as part of the kernel's own relocation
+domain.
+
+\subsection{Rustlet Runtime, ABI and Isolation}
+\label{sec:impl-rustlet-runtime}
+% --- Rustlet runtime and isolation implementation ---
+% This subsection should describe the concrete implementation of the
+% abstract Rustlet model introduced in Chapter 7.
+% It should cover:
+% - the current shared ABI based on RustletCtx;
+% - the declare_rustlet! macro and its generated start entry point;
+% - the selected-application descriptor and vtable;
+% - the current core::isolation session model;
+% - MPU planning and region programming;
+% - the concrete gate region layout;
+% - the ARM M-profile SVC / MemManage / resume path;
+% - how install, process_apdu, exit, panic and faults converge;
+% - the current limits of state persistence and serialization.
+
+The Rustlet runtime is split between two binaries. The kernel owns selection,
+registry lookup, APDU transport, MPU programming and syscall dispatch. The
+Rustlet image owns the application state, the Rustlet heap, the typed APDU
+framework and the exported entry points expected by the kernel. The boundary
+between the two is deliberately a C-style ABI rather than a native Rust trait
+object, because the kernel and the Rustlet FAE image have distinct relocation
+contexts.
+
+The first entry point of a Rustlet image is the FAE entry at offset
+\texttt{0}. The kernel enters this image with the shared
+\texttt{RustletCtx} pointer and the application global-pointer context. The
+Rustlet runtime initializes its local runtime globals, aligns the private heap
+storage declared by the macro, builds a \texttt{SelectedAppDescriptor}, and
+returns that descriptor through the dedicated runtime-return syscall. The
+descriptor contains:
+\begin{itemize}
+\item an opaque runtime state pointer;
+\item a selected-application vtable containing \texttt{install()} and
+  \texttt{process\_apdu()} handlers;
+\item an optional Security-Domain vtable for Rustlet-backed Security Domains;
+\item the Rustlet heap window exported to the kernel.
+\end{itemize}
+
+The \texttt{declare\_rustlet!} macro is the developer-facing source of this
+low-level structure. It generates the exported \texttt{start()} function,
+allocates the static Rustlet heap storage, adapts the user installation
+function into a boxed runtime instance, and wraps that instance in the runtime
+persistence adapter. \texttt{declare\_app!} is only a compatibility alias.
+\texttt{declare\_security\_domain!} follows the same pattern, but also exports
+the \texttt{sddispatch} vtable used by
+\texttt{RustletSecurityDomainProxy}.
+
+All APDU exchange uses one shared \texttt{RustletCtx}. Before a Rustlet call,
+the kernel fills the APDU header fields and stages any incoming payload in the
+context payload buffer. During the call, Rustlet code normally uses the typed
+\texttt{Apdu<State>} wrapper described in Chapter~7, but the ABI object remains
+the same shared buffer. If the Rustlet switches to outgoing mode, the same
+payload area becomes the response area. On return, the kernel publishes the
+outgoing length and status word in its transport session. In firmware, the
+transport payload and the Rustlet payload are two views of the same gate-region
+storage, so this publication does not normally copy the payload. Normal command
+completion clears the payload half. An abrupt Rustlet exit clears the complete
+shared page, and every later Rustlet entry reinitializes the control half before
+user code can observe it.
+
+The shared page has two implementation-level invariants that are deliberately
+stronger than the public Rustlet API. First, the APDU payload half is the only
+place where Rustlet command or response payload bytes are staged. Protocol
+layers must not introduce larger stack-local APDU mirrors on the hot path.
+Second, the control half is also the kernel's secondary scratch buffer before a
+Rustlet entry. Secure-channel code may use it while parsing, authenticating or
+wrapping APDUs, but every Rustlet entry path must reset it to the ABI layout
+before user code can observe the page. This is especially important when the
+scratch bytes contain decrypted data, MAC material or serialized state.
+
+The application call path is normalized around two vtable handlers. The
+\texttt{install()} handler constructs the resident Rustlet instance from the
+\texttt{INSTALL [for install]} parameters exposed by the kernel. The
+\texttt{process\_apdu()} handler loads the current serialized state if
+necessary, calls the Rustlet implementation, and saves the resident state again
+before returning. A Security-Domain Rustlet uses the same selected-application
+handlers for ordinary APDUs and the separate \texttt{sddispatch} handler for
+kernel-initiated management, secure-channel and secure-messaging hooks.
+
+Isolation is planned before the kernel enters the Rustlet. The current MPU plan
+contains the Rustlet text window, one writable RAM block containing stack,
+relocated data and heap, and the gate region. The writable Rustlet RAM block is
+mapped read/write and non-executable. The Rustlet text window is mapped
+executable only while the CPU is actually executing Rustlet code. When the
+Rustlet traps into the kernel through a syscall, the kernel switches to a
+``kernel serving Rustlet'' phase and disables execution from the active Rustlet
+text regions before servicing the request. Execution permission is restored
+only when control is returned to the Rustlet.
+
+The gate region contains the shared ABI buffer and the small target-specific
+entry/resume stubs required to cross the privileged/unprivileged boundary. It
+is the only deliberately shared execution bridge. The rest of the Rustlet
+memory map is explicit: Rustlet code cannot read or write kernel memory, cannot
+execute from its writable RAM block, and cannot execute from its own text while
+the kernel is servicing a syscall.
+
+Rustlet termination paths converge through the same isolation machinery. A
+normal handler return, an explicit Rustlet exit, a panic, and a recoverable MPU
+fault all redirect execution back to the kernel resume point with a small
+return kind and status value. For ARMv7-M targets this is primarily driven by
+the MemManage path; for ARMv6-M targets without a separate MemManage exception,
+the board port may translate the relevant HardFault cases into the same
+recoverable application-fault path. In both cases, a fault while no Rustlet call
+is active remains a kernel fault, not an application status word.
+
+The current persistence boundary is intentionally at the serialized Rustlet
+state level. The runtime adapters can load and save the resident state through
+the shared context, and the kernel stores that serialized state in the registry
+object for the selected instance. This is not yet a full non-volatile storage
+backend: without persistent registry storage, rebooting the firmware rebuilds
+the initial predeployment state. The important invariant is nevertheless
+already in place: Rustlet execution sees an instance state, not a global static
+singleton, and the registry object is the place where that state will become
+durable once flash-backed persistence is implemented.
+
+\section{APDU Parsing and Command Dispatch}
+\label{sec:impl-apdu-dispatch}
+% --- APDU parsing and command dispatch ---
+% This section describes how APDU commands are decoded and dispatched
+% to the appropriate handlers (LOAD, INSTALL, DELETE, etc.)
+
+The transport mechanics of the \texttt{T=0} exchange are described in
+Section~\ref{sec:impl-apdu-t0}. The APDU-facing implementation surfaces
+are summarized in Section~\ref{sec:impl-apdu-surfaces}. Once the command
+header has been captured, the dispatcher receives an
+\texttt{ApduCommand} through the \texttt{ApduLayer} boundary, derives an
+ephemeral kernel-side \texttt{Apdu} view from it, and then applies the
+dispatch rules. This keeps the transport representation internal to the
+base \texttt{T=0} manager and reserves the space for higher protocol
+layers such as SCP03.
+
+The dispatch layer is deliberately small and distinguishes four cases before
+ordinary application-command routing:
+\begin{itemize}
+\item \texttt{GET RESPONSE} remains entirely transport-owned;
+\item \texttt{SELECT} remains kernel-owned and updates the selected
+  context as described in Section~\ref{sec:impl-selected-context};
+\item GlobalPlatform management commands that mutate or query platform state
+  remain kernel-owned and are authorized by the active Security Domain;
+\item every other command is forwarded to the currently selected application
+  through the selected-application ABI.
+\end{itemize}
+
+This organization keeps the boundary between transport, protocol-layer
+composition, and command logic explicit. The base \texttt{T=0} manager
+remains responsible for byte acquisition, deferred \texttt{GET RESPONSE}
+handling, wrong-\texttt{Le} handling through \texttt{6Cxx}, and final
+\texttt{SW1/SW2} emission. The secure-channel layer is responsible for
+establishment, protected-command unwrapping, and protected-response wrapping.
+The management dispatcher is responsible for the kernel-owned GlobalPlatform
+operations. Only after those layers have declined a command does the ordinary
+selected-application ABI receive it.
+
+The current ABI-level exchange object is a fixed-layout
+\texttt{RustletCtx} structure containing exactly two \texttt{256}-byte halves:
+\begin{itemize}
+\item a control/secondary buffer containing the ABI version, APDU
+  header/status bytes, flags, the one-byte APDU data length and serialized
+  state;
+\item one fixed \texttt{256}-byte APDU payload buffer.
+\end{itemize}
+
+If the APDU requires command data reception, the kernel receives that
+payload and stages it into the incoming view of this shared buffer. If
+the Rustlet switches the buffer to outgoing mode, the same payload area
+is then interpreted as the response buffer.
+
+The APDU payload buffer is physically \texttt{256} bytes long, but the current
+short-APDU ABI exposes at most \texttt{255} useful bytes. This is intentional:
+the length field is one byte, and extended APDU support must be introduced as
+an ABI evolution rather than by silently overloading the current layout. The
+serialized-state slice lives in the control/secondary half and is currently
+limited to \texttt{244} bytes after ABI metadata.
+
+The kernel-to-Rustlet bridge is normalized around the
+\texttt{SEApdu} trait. In practice, three APDU-facing objects implement
+that common interface:
+\begin{itemize}
+\item the kernel-side \texttt{Apdu} wrapper;
+\item the Rustlet-side \texttt{RustletCtx};
+\item the kernel bridge object that couples the transport-owned APDU
+  state with the shared Rustlet ABI buffer while a Rustlet call is in
+  progress.
+\end{itemize}
+
+APDU command logic manipulates the current \emph{card-side APDU
+session} through the common APDU interface, while transport remains
+kernel-owned.
+
+Dispatch therefore follows this kernel-owned rule:
+\begin{itemize}
+\item \texttt{GET RESPONSE} stays transport-owned;
+\item \texttt{SELECT} stays kernel-owned and resolves an instance AID in
+  the registry;
+\item secure-channel establishment and protected-message framing stay in
+  \texttt{SecureChannelLayer};
+\item management commands such as \texttt{INSTALL}, \texttt{LOAD},
+  \texttt{DELETE}, \texttt{PUT KEY}, \texttt{GET DATA}, and
+  \texttt{GET STATUS}, \texttt{STORE DATA}, and \texttt{SET STATUS} stay
+  kernel-owned and are authorized by the active Security Domain;
+\item otherwise, the kernel calls the selected application's
+  \texttt{process\_apdu()} entry point.
+\end{itemize}
+
+For \texttt{INSTALL}, the kernel parses the
+GlobalPlatform \texttt{INSTALL [for install]} body as a sequence of
+length-value fields:
+\begin{itemize}
+\item Executable Load File AID (package AID);
+\item Executable Module AID (applet AID);
+\item Application Instance AID;
+\item privileges;
+\item install parameters.
+\end{itemize}
+
+The kernel then resolves the target Rustlet from the package/applet AID
+pair, updates the current instance AID, and only exposes the
+\emph{install parameters} to the Rustlet-side \texttt{install()}
+callback. This means that the Rustlet constructor sees the installation
+payload relevant to the application itself, while the GlobalPlatform
+deployment envelope remains kernel-owned.
+
+This rule is still intentionally narrow. The goal is to validate the
+boundary between the kernel and the selected administrative application
+before encoding the full GlobalPlatform routing matrix. In particular,
+\texttt{SELECT} itself never invokes \texttt{install()}; \texttt{INSTALL}
+is an explicit command interpreted according to the GlobalPlatform body
+structure before the
+application callback is entered.
+
+In the current Rustlet model, \texttt{install()} is the application-side
+constructor of the selected context. The ABI has no separate definition
+object.
+
+When the selected application returns, the kernel copies outgoing bytes only
+when the bridge is backed by distinct storage. The normal firmware path simply
+publishes the outgoing length for the already shared payload and then resumes
+the normal \texttt{T=0} completion logic. This means that deferred
+\texttt{GET RESPONSE} ownership, procedure-byte emission, and
+\texttt{6Cxx}/\texttt{61xx} completion rules remain entirely in the
+kernel while the selected application supplies the command semantics.
+
+This is the implementation form of the doctrine described in
+Chapter~5. Oxide SE does not currently invert the hook by making the selected
+Security Domain parse the whole GlobalPlatform command grammar and then call
+registry services. The kernel parses the management envelope, preserves the
+registry invariants, and asks the active Security Domain to authorize the
+operation in its name.
+
+The following constraints remain explicit:
+\begin{itemize}
+\item there is only one effective logical channel and one selected context
+  slot;
+\item dynamically loaded packages are not yet implemented; packages are
+  currently declared by the predeployment manifest and embedded into the
+  firmware image;
+\item the incoming-length heuristic is still a short-APDU simplification
+  and does not yet encode the full distinction between command cases;
+\item the future persistent registry backend still has to provide
+  non-volatile atomicity for the registry-object operations described above.
+\end{itemize}
+
+\section{Security Domains and Access Control}
+\label{sec:impl-security-domain}
+% --- Privilege and security domain enforcement ---
+% This section describes:
+% - privilege checking
+% - Security Domain authority
+% - access control enforcement
+% - delegation model
+
+Security-Domain authority is represented by registry objects whose
+\texttt{kind} is \texttt{SecurityDomain}. The concrete behavior behind such an
+object is selected by its backend:
+\begin{itemize}
+\item \texttt{NullSecurityDomain} is a permissive development backend used for
+  bring-up and dynamic Rustlet experiments without secure-channel keys;
+\item \texttt{KernelSecurityDomain} keeps Security-Domain policy and SCP state
+  inside the firmware;
+\item \texttt{RustletSecurityDomainProxy} keeps the kernel-side authority
+  checks and delegates backend-specific policy or SCP processing to an isolated
+  Rustlet Security Domain.
+\end{itemize}
+
+All three backends share the same kernel-owned base authority. Their
+three-byte privilege field is interpreted as GlobalPlatform administrative
+authority over operation families: load, install, delete, lifecycle
+management, key management, delegated management, token or receipt handling,
+card-level lock/termination operations, and related management functions as
+they become implemented. The backend may refuse an operation even when the base
+bit allows it, but it may not turn a missing base privilege into an allowed
+kernel mutation.
+
+This gives Rustlet-backed Security Domains their intended shape. The Rustlet
+can implement richer local policy and cryptographic behavior, and it may store
+additional serialized state of its own. The proxy nevertheless enforces the
+kernel-owned privilege floor first. If the recorded three-byte privilege set
+does not permit an operation family, the kernel refuses the operation without
+asking the Rustlet backend to override that decision.
+
+Delegation is checked at Security-Domain creation time. A supplementary
+Security Domain is installed under the currently active administrative
+Security Domain and receives that active domain as \texttt{parent\_sd\_aid}.
+The requested privilege bytes are accepted only if they are no broader than the
+authority that the parent may delegate. The resulting object then participates
+in the same filtered registry view as every other managed object.
+
+In other words, Security Domains are first-class registry objects with
+selectable AIDs and backend-specific behavior, but the registry, privilege
+non-escalation checks, and platform-state mutations remain kernel-mediated.
+
+\section{Secure Channel Command Handling}
+\label{sec:impl-scp-commands}
+% --- Secure channel command handling ---
+% This section describes:
+% - handling of INITIALIZE UPDATE
+% - handling of EXTERNAL AUTHENTICATE
+% - secure messaging extensions linked to the secure channel state
+
+The protocol shape of SCP03 and SCP11 is defined in
+Section~\ref{sec:protocol-scp}. The longer examples, including the
+Amendment~D command and response framing and the
+representative SCP03 and SCP11a/b/c APDU flows, are kept in
+Appendix~\ref{app:scp-data-objects}. The present section is narrower: it
+describes where those commands enter the reference kernel and how they are
+connected to Security-Domain policy, registry-backed key material, and APDU
+dispatch.
+
+\subsection{Establishment Dispatch}
+\label{sec:impl-scp-establishment-dispatch}
+
+Secure-channel command handling is centralized in
+\texttt{SecureChannelLayer}. This layer wraps the base \texttt{T=0} APDU
+manager. It receives complete APDU commands from the transport, handles
+secure-channel establishment commands before ordinary dispatch, unwraps
+protected commands when the secure-messaging bit is set in the CLA byte, and
+wraps protected responses before the transport emits the final response APDU.
+The layer is intentionally profile-neutral: it knows which APDU opcodes belong
+to secure-channel establishment, but it delegates the cryptographic decision to
+the active Security Domain backend.
+
+The establishment candidates are:
+\begin{itemize}
+\item \texttt{INITIALIZE UPDATE} and \texttt{EXTERNAL AUTHENTICATE} for SCP03;
+\item \texttt{PERFORM SECURITY OPERATION} and \texttt{MUTUAL AUTHENTICATE} for
+  SCP11a and SCP11c;
+\item \texttt{INTERNAL AUTHENTICATE} for SCP11b.
+\end{itemize}
+
+The set of accepted candidates is controlled by the effective build
+configuration described in Section~\ref{sec:impl-scp-profiles}. If SCP11a and
+SCP11b are compiled and enabled but SCP11c is not, the layer rejects an SCP11c
+establishment attempt before it can become an authenticated session. If no SCP
+protocol is enabled, the layer becomes a pass-through boundary except for the
+identity/test mode used by kernel validation.
+
+Once an establishment APDU has been recognized, the layer consumes its incoming
+payload, builds a \texttt{SecureChannelEstablishmentCommand}, and calls the
+current Security Domain. Kernel-native Security Domains resolve static keys or
+SCP11 material inside the firmware. Rustlet-backed Security Domains receive the
+same request through the proxy path and may perform the profile-specific
+cryptographic work in user-land. In both cases, the active Security Domain is
+the authority that owns the session state; \texttt{SecureChannelLayer} only
+owns the APDU boundary.
+
+\subsection{SCP03 INITIALIZE UPDATE Handling}
+\label{sec:impl-scp-init}
+% --- INITIALIZE UPDATE handling ---
+% This subsection describes:
+% - host challenge processing
+% - card challenge generation
+% - key version selection
+% - session key derivation (SCP02 / SCP03)
+% - construction of response cryptogram
+% - preparation of secure session context
+
+\texttt{INITIALIZE UPDATE} is the first SCP03 establishment command. The
+reference APDU shape and the expected protocol fields are described in
+Section~\ref{sec:protocol-scp}; the exact SCP03 KDF material is detailed in
+Appendix~\ref{app:scp-data-objects}. On the implementation path, the secure
+channel layer recognizes \texttt{INS = 50} on a GlobalPlatform secure-channel
+CLA and forwards the command body to the active Security Domain.
+
+The Security Domain then performs the SCP03-specific work:
+\begin{itemize}
+\item parse the key version, key identifier and host challenge carried by the
+  command;
+\item resolve the corresponding static key objects in the registry, scoped by
+  the Security Domain instance;
+\item generate the card challenge and derive the session keys;
+\item compute the card cryptogram and build the response payload;
+\item store the initialized but not yet authenticated session state.
+\end{itemize}
+
+This split keeps static-key storage out of the protocol core. The pure SCP03
+engine receives explicit key material and challenges; it does not know whether
+those keys came from the root Security Domain, a supplementary kernel-native
+Security Domain, or a Rustlet-backed Security Domain proxy. Conversely, the
+registry and Security-Domain layers do not implement CMAC/KDF internals
+themselves. They resolve authority and key material, then call the pure engine.
+
+At the end of a successful \texttt{INITIALIZE UPDATE}, the secure channel is
+not yet open. The session material is staged, but protected APDUs are still
+rejected until \texttt{EXTERNAL AUTHENTICATE} succeeds. This distinction is
+important for replay and stale-session handling: a second establishment
+sequence replaces the pending material for that Security Domain and logical
+channel rather than silently authenticating an older chain.
+
+\subsection{SCP03 EXTERNAL AUTHENTICATE Handling}
+\label{sec:impl-scp-auth}
+% --- EXTERNAL AUTHENTICATE handling ---
+% This subsection describes:
+% - host cryptogram verification
+% - security level activation
+% - transition to an authenticated secure-channel state
+% - failure handling and session rejection
+
+\texttt{EXTERNAL AUTHENTICATE} completes SCP03 establishment. The command
+contains the requested security level, the host cryptogram computed over the
+session material produced by \texttt{INITIALIZE UPDATE}, and the transmitted
+initial C-MAC required by SCP03 Amendment~D. The secure-channel layer recognizes
+\texttt{INS = 82} with the SCP03 establishment shape and forwards the request
+to the active Security Domain.
+
+The Security Domain verifies both the host cryptogram and the C-MAC against the
+pending SCP03 session. The C-MAC is computed from an all-zero chaining value
+over the \texttt{84 82 P1 00 Lc} command header and the host cryptogram; the
+\texttt{Lc} byte includes the transmitted C-MAC. If verification succeeds, the
+Security Domain records the authenticated security level and initializes the
+secure-messaging state: command MAC chain, response MAC chain, encryption
+counters, and profile-specific MAC length. The full sixteen-byte
+\texttt{EXTERNAL AUTHENTICATE} C-MAC seeds both MAC chains, including for S8
+where only eight bytes are transmitted. If verification fails, the pending
+session remains unauthenticated and the command returns a failure status rather
+than leaving a partially authenticated session behind.
+
+The security level selected here controls later protected APDUs. In the
+Oxide SE SCP03 profile, C-MAC authenticates commands and C-ENC decrypts command
+data; responses remain plain because response-protection levels are explicitly
+profiled out. The APDU dispatcher does not duplicate this matrix. It asks the
+active Security Domain to unwrap commands and consults the authenticated
+session state before deciding whether response wrapping applies. The exact
+selected values and rejections are stated in
+Section~\ref{sec:impl-scp-selected-levels}.
+
+\subsection{SCP11 PSO, MUTUAL AUTHENTICATE and INTERNAL AUTHENTICATE Handling}
+\label{sec:impl-scp11-establishment}
+
+SCP11a, SCP11b and SCP11c enter the implementation through the common
+secure-channel establishment dispatcher. Unlike SCP03, they do not use the
+pair formed by \texttt{INITIALIZE UPDATE} and
+\texttt{EXTERNAL AUTHENTICATE}. Their normative command sequences are described
+in Section~\ref{sec:protocol-scp} and illustrated in
+Appendix~\ref{app:scp-data-objects}. The implementation section should
+therefore be read as a routing and state-management description, not as a
+second copy of the SCP11 standard text.
+
+For SCP11a and SCP11c, \texttt{PERFORM SECURITY OPERATION} is handled as a
+profile-specific establishment command. The secure-channel layer recognizes
+\texttt{INS = 2A} when SCP11 support is enabled, receives the incoming BER-TLV
+certificate or key material, and forwards it to the active Security Domain. The
+Security Domain validates the profile-specific material and records the
+intermediate SCP11 establishment state required by the following
+\texttt{MUTUAL AUTHENTICATE}. A repeated or stale PSO sequence replaces or
+rejects that intermediate state according to the Security Domain policy; it
+must not silently authenticate an older receipt chain.
+
+\texttt{MUTUAL AUTHENTICATE} then opens SCP11a or SCP11c. The secure-channel
+layer recognizes the non-SCP03 \texttt{INS = 82} shape and forwards the APDU
+body to the same active Security Domain. The backend parses the CRT and public
+key material, computes the profile-specific ECDH contribution, builds the
+GlobalPlatform SharedInfo value, derives the secure-messaging keys, verifies
+the expected receipt or cryptogram, and records the authenticated session
+state. Kernel-native and Rustlet-backed Security Domains share the same APDU
+boundary; what differs is where the profile-specific cryptography and policy
+are executed.
+
+SCP11b opens through \texttt{INTERNAL AUTHENTICATE}. The secure-channel layer
+recognizes \texttt{INS = 88} only when SCP11b is enabled, then delegates the
+body to the active Security Domain. The backend performs the SCP11b
+card-authentication key agreement, derives the same kind of secure-messaging
+state used by the other profiles, and records the session as authenticated.
+Because SCP11b does not authenticate the OCE inside the SCP11 exchange itself,
+any additional authorization policy belongs to the selected Security Domain
+rather than to \texttt{SecureChannelLayer}.
+
+After successful SCP11 establishment, the command path converges with SCP03:
+later protected APDUs use the same raw payload-and-MAC framing, and the
+dispatcher remains profile-neutral after unwrapping.
+
+\subsection{Protected APDU Unwrap and Wrap}
+\label{sec:impl-scp-ext}
+
+The protected-APDU path is the implementation counterpart of the
+secure-messaging grammar introduced in Section~\ref{sec:protocol-scp} and
+specified byte-for-byte in Appendix~\ref{app:scp-data-objects}. Its purpose is
+not to implement application commands. It is the boundary that turns a
+wire-level protected APDU into the clear command semantics consumed by the
+kernel dispatcher, then turns the logical response back into a protected
+GlobalPlatform response body.
+
+\subsubsection{Command classification}
+
+Protected command handling starts from the CLA byte. In the command families
+accepted by the reference kernel, bit \texttt{0x04} marks a
+secure-messaging command. If this bit is present while no authenticated session
+is open for the active Security Domain, the command is rejected with a
+conditions-not-satisfied status before it reaches management or Rustlet
+dispatch.
+
+For SCP03, a command without that bit continues through the clear-command path
+and is interpreted under the authority policy described in
+Section~\ref{sec:impl-apdu-dispatch}. SCP11 applies the stricter Amendment~F
+session rule: while secure messaging is active, clear \texttt{SELECT}
+terminates the session and is then processed normally; every other clear
+command aborts the session and returns \texttt{6985}. A protected management
+command that unwraps successfully is then checked against the peer/profile
+matrix in Section~\ref{sec:impl-scp-selected-levels} before any registry
+mutation or Security Domain hook.
+
+The identity secure-channel mode used by kernel validation is a special build
+profile. It leaves the APDU body untouched so that low-level transport and
+dispatcher tests can exercise the same layer ordering without cryptographic
+state. Production SCP03 and SCP11 profiles do not use that bypass.
+
+\subsubsection{Protected command unwrapping}
+
+For a protected command, \texttt{SecureChannelLayer} first receives the
+incoming APDU bytes into the shared APDU buffer. As described in
+Appendix~\ref{app:scp-data-objects}, it separates the trailing
+profile-dependent C-MAC from the preceding clear or encrypted command data.
+The APDU \texttt{Le} remains in the APDU encoding. The layer rejects missing
+MAC bytes and oversized protected fields before the command can be dispatched.
+
+The layer then reconstructs the authenticated command string from the APDU
+header and the authenticated prefix of the protected body. This is the byte
+string whose MAC-chain semantics are defined by the selected SCP profile. The
+actual verification, counter update, decryption, and padding removal are
+delegated to the active Security Domain through its
+\texttt{unwrap\_command()} hook. This keeps profile-specific cryptography,
+registry-backed keys, and Security-Domain policy out of the transport layer.
+
+If unwrapping succeeds, the protected incoming payload in the APDU buffer is
+replaced by the clear payload returned by the Security Domain. From that point
+onward, management handlers and Rustlet dispatch see the same logical command
+they would have seen in clear. They do not need to know whether the external
+wire representation contained clear or encrypted protected data and its
+trailing MAC; secure messaging remains a boundary concern.
+
+The unwrap path must preserve the shared-buffer discipline. The protected APDU
+body is parsed from the APDU payload buffer, while temporary clear/protected
+material should use the secondary half of \texttt{RustletCtx} or another
+explicit kernel-owned scratch area, not unbounded stack arrays. Once the
+logical command is reconstructed, the APDU payload buffer contains only the
+clear command payload that will be seen by management handlers or by the
+selected Rustlet.
+
+\subsubsection{Protected response wrapping}
+
+Response handling mirrors the command path. If the command was protected, the
+logical response bytes and the logical status word are given to the active
+Security Domain through its \texttt{wrap\_response()} hook. The Security Domain
+applies the authenticated session state and returns a protected response body:
+clear or encrypted response data followed by the R-MAC when the selected
+security level requires one. The logical status remains the actual trailing
+APDU status word and is included in the R-MAC calculation.
+
+Whether wrapping is required is captured from the authenticated session while
+the command is being unwrapped, before ordinary dispatch. The resulting policy
+bit is stored in the current \texttt{ApduCommand} and consumed during response
+completion; it cannot leak into the next command because it has the same
+lifetime as that APDU. This ordering is significant for a Rustlet-backed
+Security Domain: querying its state uses \texttt{sddispatch}, which owns the
+same shared APDU page and would otherwise overwrite an application response
+that has already been produced.
+
+The transport emits the logical application or management status as the
+actual trailing status word. When R-MAC is active, that status is
+authenticated together with the protected response data, as illustrated in
+Appendix~\ref{app:scp-data-objects}.
+
+\subsubsection{Profile neutrality and replay invariants}
+
+The unwrap/wrap path is common to SCP03 and SCP11 sessions. What differs
+between profiles is the establishment sequence and the session material from
+which MAC and encryption keys were derived. After establishment, the command
+dispatcher deliberately remains profile-neutral: it handles a clear command
+view and relies on the active Security Domain to enforce the selected SCP
+profile, security level, MAC length, counters, receipt state, and replay
+policy.
+
+The invariant is simple: a protected APDU that fails MAC verification, uses a
+stale chain value, exceeds the bounded protected-payload limits, or targets a session
+that is not authenticated must fail before ordinary command logic sees it.
+Only successfully unwrapped commands may mutate registry state, call Rustlet
+code, or produce protected responses.
+
+The implementation exposes one status-word contract for both the native and
+Rustlet-backed Security Domain paths:
+\begin{description}
+\item[\texttt{6700}] a profile-dependent length is invalid or a bounded output
+      cannot contain the requested transformation;
+\item[\texttt{6A80}] an SCP11 CRT or another command data structure is
+      malformed;
+\item[\texttt{6A86}] \texttt{P1/P2} is invalid or selects an option excluded
+      by the compiled profile;
+\item[\texttt{6A88}] the referenced SCP03 keyset or SCP11 ECKA/CA key does not
+      exist for the active Security Domain;
+\item[\texttt{6600}] SCP11 certificate verification failed;
+\item[\texttt{6300}] SCP03 host authentication failed;
+\item[\texttt{6982}] secure-messaging authentication failed, including a stale
+      MAC chain, stale receipt, or replay;
+\item[\texttt{6985}] the command is valid but its protocol precondition is not
+      satisfied;
+\item[\texttt{6D00}] the establishment instruction is outside the compiled
+      SCP profile.
+\end{description}
+
+MAC chains and encryption counters are transactional. The engines derive a
+candidate next state, complete every bounds check and cryptographic transform,
+and only then publish that state. A rejected protected APDU therefore cannot
+consume one chain value or counter. Structural errors leave an authenticated
+session available for a corrected APDU. A cryptographic secure-messaging
+failure returns \texttt{6982}, erases the session, and causes later protected
+commands to return \texttt{6985} until establishment is completed again.
+Likewise, a failed \texttt{EXTERNAL AUTHENTICATE} cannot be retried without a
+new \texttt{INITIALIZE UPDATE}.

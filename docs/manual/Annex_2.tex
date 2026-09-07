@@ -1,0 +1,409 @@
+\chapter{Secure Channel Protocol and Protected APDU Encoding}
+\label{app:scp-data-objects}
+
+This appendix sits next to Appendix~\ref{app:apdu-over-t0}: the T=0 appendix
+describes how bytes are moved, while this appendix describes what changes when
+those bytes are protected by a GlobalPlatform Secure Channel Protocol.
+
+The main protocol sequence is described in Chapter~3. This appendix gives the
+longer byte-level details that would make the chapter too dense: BER-TLV
+objects used by SCP11, SCP03 KDF material, and the Amendment~D protected-APDU
+framing used after channel establishment.
+
+\section{What a Secure Channel Changes}
+
+Without a Secure Channel, the command data received by a selected application
+or by the kernel management dispatcher is the data sent by the host. The status
+word returned by the command handler is the status word sent back to the host.
+
+With an active Secure Channel, several additional rules apply:
+\begin{itemize}
+\item the command CLA carries the GlobalPlatform secure-messaging indication;
+\item command data may be encrypted before it reaches the command handler;
+\item command data and selected command header bytes are authenticated by
+      \texttt{C-MAC};
+\item response data may be encrypted before it leaves the secure element;
+\item response data and the final status word may be authenticated by
+      \texttt{R-MAC};
+\item the active Security Domain instance and logical channel define which
+      secure-channel session is used;
+\item management commands that mutate the registry are authorized through the
+      active Security Domain, not merely by the selected application.
+\end{itemize}
+
+The important architectural consequence is that protected APDUs are not a new
+application ABI. They are a wire-level representation. The secure-channel layer
+unwraps them into the same clear APDU model described in
+Appendix~\ref{app:apdu-over-t0}, then wraps the response back into the protected
+wire representation.
+
+\section{Secure Channel Establishment Objects}
+
+Secure Channel establishment APDUs are ordinary APDUs whose data fields carry
+profile-specific cryptographic objects. SCP03 uses fixed response fields around
+the host and card challenges. SCP11 uses BER-TLV Control Reference Templates
+and certificate/public-key Data Objects.
+
+\subsection{SCP03}
+
+SCP03 is the symmetric AES-based Secure Channel. It is established with
+\texttt{INITIALIZE UPDATE} followed by \texttt{EXTERNAL AUTHENTICATE}.
+
+The APDU-level establishment commands are:
+\begin{itemize}
+\item \texttt{INITIALIZE UPDATE}:
+      \texttt{CLA=80}, \texttt{INS=50}, \texttt{P1=key version},
+      \texttt{P2=00}. The command carries the host challenge and
+      the response carries the card challenge, key identifiers and card
+      cryptogram material needed by the host-side oracle.
+\item \texttt{EXTERNAL AUTHENTICATE}:
+      \texttt{CLA=84}, \texttt{INS=82}, \texttt{P1=security level},
+      \texttt{P2=00}. The command carries the host cryptogram followed by the
+      transmitted C-MAC. If verification succeeds, the SCP03 session becomes
+      authenticated at the requested security level, and the full C-MAC becomes
+      the initial secure-messaging MAC chain.
+\item \texttt{PUT KEY}: a Security Domain management command used to install
+      or rotate key material used by later Secure Channel establishment.
+\end{itemize}
+
+The S8 and S16 profiles differ in challenge, cryptogram and transmitted MAC
+lengths. The secure-channel layer therefore asks the active Security Domain
+for the current MAC length before splitting the trailing C-MAC from the
+protected APDU data field.
+
+\subsection{SCP03 Cryptographic Material and KDF}
+
+The static key material stored in a Security Domain for SCP03 is a triple of
+AES keys \gpref{scp03}{§6.1}:
+\begin{itemize}
+\item \texttt{Key-ENC}, used to derive the session encryption key;
+\item \texttt{Key-MAC}, used to derive the session MAC keys;
+\item \texttt{Key-DEK}, used to protect sensitive key data during key loading.
+\end{itemize}
+
+The specification allows AES key sizes of 128, 192, or 256 bits for this key
+set \gpref{scp03}{§6.1}. The SCP03 session derivation is deterministic: the
+static keys, host challenge and card challenge are combined through the
+SCP03-defined KDF to produce:
+\begin{itemize}
+\item \texttt{S-ENC}, used for command and response confidentiality when
+      enabled;
+\item \texttt{S-MAC}, used for command authentication and MAC chaining;
+\item \texttt{S-RMAC}, used for response authentication when R-MAC is enabled.
+\end{itemize}
+
+SCP03 defines a counter-mode KDF using CMAC as the pseudorandom function, with
+a fixed input format carrying a derivation constant, a length field and a
+context \gpref{scp03}{§4.1.5}. This maps to NIST SP 800-108 for the KDF
+\cite{nist800108} and NIST SP 800-38B for CMAC \cite{nist80038b}. The
+secure-messaging encryption path relies on AES block-cipher modes defined by
+GlobalPlatform with reference to NIST block-cipher mode recommendations
+\cite{nist80038a}.
+
+A useful naming distinction is that \texttt{C-MAC} and \texttt{R-MAC} are
+GlobalPlatform protocol values carried on the wire, while CMAC is the
+underlying NIST authentication primitive used to compute them. The same
+distinction applies to cryptograms: they are protocol values produced from the
+session KDF and CMAC machinery, not a separate asymmetric authentication
+primitive.
+
+\subsection{SCP11x: SCP11a, SCP11b and SCP11c}
+
+SCP11 is the asymmetric GlobalPlatform secure-channel family. It uses ECC key
+agreement to derive the symmetric secure-messaging keys that are then used in
+the same APDU protection position as SCP03.
+
+GlobalPlatform defines three SCP11 variants:
+\begin{itemize}
+\item \textbf{SCP11a}: mutual authentication between the OCE and the card.
+      The OCE certificate is first submitted with
+      \texttt{PERFORM SECURITY OPERATION}; the channel is then opened with
+      \texttt{MUTUAL AUTHENTICATE}. Both static and ephemeral card-side
+      contributions are used.
+\item \textbf{SCP11b}: card authentication to the OCE only. OCE
+      authentication is provided outside SCP11, for example by an application
+      policy. The channel is opened with \texttt{INTERNAL AUTHENTICATE}, not
+      \texttt{MUTUAL AUTHENTICATE}.
+\item \textbf{SCP11c}: mutual authentication using static card-side
+      authentication material. It is suitable for offline card-management
+      scripts authorized by \texttt{CERT.OCE.ECKA}.
+\end{itemize}
+
+The SCP identifier data object uses tag \texttt{90}. Its value is two bytes:
+the first byte is \texttt{11}; the second byte encodes the SCP11 profile and
+options. In the profile bits, \texttt{00} identifies SCP11b, \texttt{01}
+identifies SCP11a, and \texttt{11} identifies SCP11c. Bit~3 controls whether
+identity material is included in the KDF: SCP11a/SCP11b use HostID, SIN and
+SDIN, whereas SCP11c uses HostID and Card Group ID.
+
+\subsubsection{Common SCP11 APDU Objects}
+
+All SCP11 establishment APDUs use a BER-TLV Control Reference Template with
+tag \texttt{A6}. The key-agreement CRT contains:
+\begin{itemize}
+\item \texttt{90 02 11 pp}: SCP identifier and parameters, where
+      \texttt{pp} selects SCP11a/SCP11b/SCP11c and the identity-in-KDF option;
+\item \texttt{95 01 kuq}: key usage qualifier and requested secure-messaging
+      level. Common values include \texttt{34} for C-MAC/R-MAC and
+      \texttt{3C} for C-MAC/C-ENC/R-MAC/R-ENC; \texttt{1C} and \texttt{74}
+      are SCP11c-only values;
+\item \texttt{80 01 88}: AES key type;
+\item \texttt{81 01 LL}: AES key length in bytes, for example
+      \texttt{10} for AES-128;
+\item \texttt{84 Lh <HostID>}: optional HostID, present exactly when the
+      profile parameter requests identity material in the KDF;
+\item \texttt{5F49 Lq <ePK.OCE.ECKA>}: the OCE ephemeral public key.
+\end{itemize}
+
+For P-256, \texttt{ePK.OCE.ECKA} is normally the uncompressed SEC1 point:
+\texttt{04 || X || Y}, i.e. 65 bytes. In short APDU notation, a minimal
+AES-128 CRT with HostID omitted therefore has the following shape:
+
+\begin{verbatim}
+A6 50
+   90 02 11 pp
+   95 01 kuq
+   80 01 88
+   81 01 10
+   5F 49 41 04 <64 bytes of OCE ephemeral point>
+\end{verbatim}
+
+If HostID is included, the \texttt{A6} length increases by
+\texttt{2 + len(HostID)} and the CRT contains:
+
+\begin{verbatim}
+84 Lh <HostID>
+\end{verbatim}
+
+For \texttt{MUTUAL AUTHENTICATE} and \texttt{INTERNAL AUTHENTICATE},
+\texttt{P1.b1--b7} select the version of \texttt{SK.SD.ECKA} and
+\texttt{P2.b1--b7} select its key identifier.  Bit~8 is reserved in both
+parameters and must be zero; the key identifier in \texttt{P2} is non-zero.
+The selected key belongs to the addressed Security Domain.  A card must reject
+an unsupported selector rather than silently substituting a default ECKA key.
+
+The identity fields are not interchangeable APDU inputs.  Tag \texttt{84}
+supplies only \texttt{HostID}, and its presence must agree exactly with bit~3
+of \texttt{pp}.  When that bit is set, the Security Domain supplies its own
+\texttt{SIN}/\texttt{SDIN} values for SCP11a/SCP11b.  For SCP11c it supplies
+the Card Group ID obtained from tag \texttt{5F20} of
+\texttt{CERT.SD.ECKA}.  The OCE cannot replace those card-owned values by
+adding another CRT data object.
+
+The successful response to the SCP11 key-agreement APDU returns:
+
+\begin{verbatim}
+5F 49 Lq <card public key material>
+86 10 <16-byte receipt>
+90 00
+\end{verbatim}
+
+For SCP11a and SCP11b, \texttt{5F49} contains the card ephemeral public key.
+For SCP11c, \texttt{5F49} contains the card static public key used in the
+receipt calculation.
+
+\paragraph{PSO selectors and chaining.}
+For the SCP11 \texttt{PERFORM SECURITY OPERATION} certificate command,
+\texttt{P1.b1--b7} select the CA public-key version and \texttt{P2.b1--b7}
+select the CA public-key identifier.  The two high bits have independent
+meanings:
+\begin{itemize}
+\item \texttt{P1.b8 = 1} announces another command block belonging to the same
+      certificate; \texttt{P1.b8 = 0} marks its final command block;
+\item \texttt{P2.b8 = 1} announces another certificate in the certificate
+      chain; \texttt{P2.b8 = 0} marks the final OCE certificate.
+\end{itemize}
+All command blocks of one certificate retain the same CA selector and are
+concatenated in order before certificate parsing and signature verification.
+Changing the selector, overflowing the announced implementation bound, or
+interrupting the sequence invalidates that in-progress command chain; no
+partially assembled certificate may reach the Security Domain.  A profile that
+does not support intermediate certificate chains rejects
+\texttt{P2.b8 = 1} with \texttt{6A86}.
+
+\subsubsection{SCP11a Exchange}
+
+SCP11a first authenticates the OCE key material to the Security Domain, then
+opens the channel with \texttt{MUTUAL AUTHENTICATE}. A representative
+single-certificate exchange is:
+
+\begin{verbatim}
+1. GET DATA: retrieve CERT.SD.ECKA
+   C-APDU: 80 CA BF 21 06 A6 04 83 02 kid kvn 00
+   R-APDU: BF 21 L ... 7F 21 L <CERT.SD.ECKA> ... 90 00
+
+2. PERFORM SECURITY OPERATION: submit CERT.OCE.ECKA
+   C-APDU: 80 2A kvn kid Lc 7F 21 L <CERT.OCE.ECKA> 00
+   R-APDU: 90 00
+
+3. MUTUAL AUTHENTICATE: open SCP11a
+   C-APDU: 80 82 sd-kvn sd-kid Lc
+           A6 L
+              90 02 11 01
+              95 01 3C
+              80 01 88
+              81 01 10
+              5F 49 41 04 <64-byte ePK.OCE.ECKA>
+           00
+   R-APDU: 5F 49 41 04 <64-byte ePK.SD.ECKA>
+           86 10 <receipt>
+           90 00
+\end{verbatim}
+
+If the identity-in-KDF option is enabled, the profile byte is
+\texttt{05} rather than \texttt{01}, and the CRT must also contain
+\texttt{84 Lh <HostID>}. The KDF SharedInfo then concatenates the key usage,
+key type, key length, \texttt{HostID-LV}, \texttt{SIN-LV} and
+\texttt{SDIN-LV}. SCP11a combines two ECDH contributions: one using the
+authenticated static OCE public key and the card static private key, and one
+using both ephemeral keys. The KDF secret is ordered
+\texttt{ShSee || ShSss}. The resulting \texttt{KeyData} is assigned, in
+order, to the receipt key, \texttt{S-ENC}, \texttt{S-MAC},
+\texttt{S-RMAC}, and \texttt{S-DEK}. The receipt covers the exact
+\texttt{A6} CRT and OCE \texttt{5F49} objects from the command followed by
+the card \texttt{5F49} object returned in the response.
+
+Freshness and replay discipline for SCP11a follows directly from the ephemeral
+exchange and the session rules: a new \texttt{MUTUAL AUTHENTICATE} terminates
+any previous secure-channel session on the logical channel; stale receipts,
+stale MAC chains and replayed protected commands must be rejected by the
+secure-messaging state.
+
+\subsubsection{SCP11b Exchange}
+
+SCP11b does not use \texttt{PERFORM SECURITY OPERATION} as part of the secure
+channel initiation. The card authenticates itself to the OCE; the OCE must be
+authorized by another mechanism before the resulting channel is accepted for
+management policy. The SCP11b APDU sequence is therefore:
+
+\begin{verbatim}
+1. GET DATA: retrieve CERT.SD.ECKA
+   C-APDU: 80 CA BF 21 06 A6 04 83 02 kid kvn 00
+   R-APDU: BF 21 L ... 7F 21 L <CERT.SD.ECKA> ... 90 00
+
+2. Application-specific OCE authorization
+   Example: VERIFY PIN, proprietary policy, or another selected application
+   contract. This step is outside SCP11 itself.
+
+3. INTERNAL AUTHENTICATE: open SCP11b
+   C-APDU: 80 88 sd-kvn sd-kid Lc
+           A6 L
+              90 02 11 00
+              95 01 3C
+              80 01 88
+              81 01 10
+              5F 49 41 04 <64-byte ePK.OCE.ECKA>
+           00
+   R-APDU: 5F 49 41 04 <64-byte ePK.SD.ECKA>
+           86 10 <receipt>
+           90 00
+\end{verbatim}
+
+With identity material included in the KDF, the profile byte becomes
+\texttt{04} and the CRT includes \texttt{84 Lh <HostID>}. SCP11b SharedInfo
+uses the same identity shape as SCP11a: key usage, key type, key length,
+\texttt{HostID-LV}, \texttt{SIN-LV} and \texttt{SDIN-LV}. The shared secret
+concatenates the ephemeral/ephemeral contribution with the contribution based
+on the OCE ephemeral public key and the card static private key.
+
+The key policy difference is authorization, not wrapping. SCP11b can prove the
+card to the OCE and derive secure-messaging keys, but the kernel must not treat
+that as OCE authentication unless a separate Security Domain or application
+policy has established it.
+
+\subsubsection{SCP11c Exchange}
+
+SCP11c first authenticates the OCE certificate with PSO. The subsequent
+mutual-authentication APDU derives the channel using the OCE static key, the
+OCE ephemeral key and the card static key.
+
+The Security Domain computes the following KDF input:
+
+\begin{verbatim}
+ShSes = ECDH(SK.SD.ECKA, ePK.OCE.ECKA)
+ShSss = ECDH(SK.SD.ECKA, PK.OCE.ECKA)
+ShS   = ShSes || ShSss
+\end{verbatim}
+
+SCP11c therefore generates no card-side ephemeral key pair: the public key
+returned in \texttt{5F49} is the static \texttt{PK.SD.ECKA} corresponding to
+\texttt{SK.SD.ECKA}.
+
+A representative AES-128 full secure-messaging exchange is:
+
+\begin{verbatim}
+1. Optional GET DATA before offline script creation
+   C-APDU: 80 CA BF 21 06 A6 04 83 02 kid kvn 00
+   R-APDU: BF 21 L ... 7F 21 L <CERT.SD.ECKA> ... 90 00
+
+2. PERFORM SECURITY OPERATION: submit CERT.OCE.ECKA
+   C-APDU: 80 2A kvn kid Lc 7F 21 L <CERT.OCE.ECKA> 00
+   R-APDU: 90 00
+
+3. MUTUAL AUTHENTICATE: open SCP11c
+   C-APDU: 80 82 sd-kvn sd-kid Lc
+           A6 L
+              90 02 11 03
+              95 01 3C
+              80 01 88
+              81 01 10
+              5F 49 41 04 <64-byte ePK.OCE.ECKA>
+           00
+   R-APDU: 5F 49 41 04 <64-byte PK.SD.ECKA>
+           86 10 <receipt>
+           90 00
+\end{verbatim}
+
+If identity material is included in the KDF, the profile byte becomes
+\texttt{07}, the CRT includes \texttt{84 Lh <HostID>}, and SharedInfo uses
+\texttt{HostID-LV} plus \texttt{Card Group ID-LV}. The Card Group ID is the
+length/value form of tag \texttt{5F20} from \texttt{CERT.SD.ECKA}.
+
+SCP11c has two replay-sensitive properties:
+\begin{itemize}
+\item the \texttt{MUTUAL AUTHENTICATE} receipt binds the CRT, the OCE
+      ephemeral key and the card public key material returned in \texttt{5F49};
+\item once the channel is active, protected APDUs use the same Amendment~D
+      payload-and-MAC framing as SCP03, so stale command MAC chains, stale receipts and replayed
+      protected commands must fail before command dispatch.
+\end{itemize}
+
+\section{Protected APDU Encoding under Amendment D}
+
+SCP03 Amendment~D does not encode secure messaging with the ISO~7816
+\texttt{DO87}, \texttt{DO97}, \texttt{DO8E}, and \texttt{DO99} objects.  The
+protected command data field is instead the command payload followed directly
+by the transmitted C-MAC:
+
+\begin{verbatim}
+[clear command data | encrypted padded command data] || C-MAC
+\end{verbatim}
+
+The APDU header carries the secure-messaging class bits.  An expected response
+length remains the APDU \texttt{Le}; it is not moved into a data object.  The
+C-MAC calculation binds the modified command header, the protected command
+data length, the protected command data, and the preceding MAC chain.  The
+receiver separates the trailing profile-dependent MAC length, verifies the
+C-MAC, and only then decrypts and removes padding when command encryption is
+active.
+
+When response protection is active, the response has the corresponding raw
+form:
+
+\begin{verbatim}
+[clear response data | encrypted padded response data] || R-MAC || SW1 || SW2
+\end{verbatim}
+
+The status word remains the actual trailing APDU status word.  It is included
+in the R-MAC calculation with the protected response data; it is not replaced
+by a \texttt{DO99}.  Therefore alteration of either the response data or the
+status word is detected.
+
+The same external framing is used by the SCP11 support in oXiDe SE after its
+distinct asymmetric establishment and session-key derivation.  The selected
+Security Domain owns the profile state, key material, chaining values, and
+security level, while the common secure-channel layer owns the split,
+authentication, decryption, encryption, and dispatch boundary.  Command
+handlers and selected Rustlets receive only the logical clear APDU and return a
+logical clear response; neither depends on the external secure-messaging
+framing.

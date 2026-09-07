@@ -1,0 +1,248 @@
+\documentclass[a4paper,11pt,twoside,openright]{book}
+
+\usepackage[margin=2cm]{geometry}
+\usepackage{lmodern}
+\usepackage{parskip}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{draftwatermark}
+\SetWatermarkText{DRAFT}
+\SetWatermarkScale{2}
+\SetWatermarkColor[gray]{0.9}
+\raggedbottom
+
+
+\makeatletter
+\def\cleardoublepage{%
+  \clearpage
+  \if@twoside
+    \ifodd\c@page
+    \else
+      \hbox{}
+      \thispagestyle{empty} % <-- clé ici
+      \newpage
+      \if@twocolumn
+        \hbox{}
+        \newpage
+      \fi
+    \fi
+  \fi
+}
+\makeatother
+\newcommand{\tbc}{\textit{[To be completed...]}}
+\newcommand{\TBC}{\begin{center}\textit{To be completed...}\end{center}}
+
+\newcommand{\gpref}[2]{(cf. \cite{#1}, #2)}
+
+
+% --- APDU Command Diagram Macro ---
+% Parameters:
+% #1 CLA
+% #2 INS
+% #3 P1
+% #4 P2
+% #5 Lc
+% #6 Le
+% #7 Incoming payload description (or "none")
+% #8 Outgoing payload description (or "none")
+\newcommand{\apdudesc}[8]{%
+\par\medskip
+\begingroup
+\def\hasin{1}%
+\def\hasout{1}%
+\ifstrequal{#7}{none}{\def\hasin{0}}{}%
+\ifstrequal{#8}{none}{\def\hasout{0}}{}%
+% Vertical layout:
+% - if there is no incoming payload, command line moves down
+% - if there is no outgoing payload, response payload line disappears and SW line moves up
+\def\ycmd{0}%
+\def\yin{-1}%
+\def\yout{-2}%
+\def\ysw{-3}%
+\ifstrequal{\hasin}{0}{%
+  \def\ycmd{-0.5}%
+}{}
+\ifstrequal{\hasout}{0}{%
+  \def\ysw{-2}%
+}{}
+\begin{center}
+\begin{figure}[ht]
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum width=1.4cm, minimum height=0.8cm, font=\scriptsize},
+    bigbox/.style={draw, rounded corners, minimum width=4cm, minimum height=0.8cm, font=\scriptsize},
+    arrow/.style={->, thick}
+]
+% Client / Secure Element
+\node at (-6,1.3) {\textbf{Client}};
+\node at (7,1.3) {\textbf{Secure Element}};
+% Vertical labels
+\node[rotate=90] at (-6.2,\ycmd-0.5) {\textit{APDU}};
+\node[rotate=90] at (-6.6,\ycmd-0.5) {\textit{Command}};
+\node[rotate=90] at (8.2,\ysw+0.5)  {\textit{APDU}};
+\node[rotate=90] at (8.6,\ysw+0.5)  {\textit{Response}};
+% Header boxes
+\node            at (-3,\ycmd+0.6) {\texttt{CLA}};
+\node[box] (cla) at (-3,\ycmd) {\\#1};
+\node            at (-1.5,\ycmd+0.6) {\texttt{INS}};
+\node[box] (ins) at (-1.5,\ycmd) {\\#2};
+\node            at (0,\ycmd+0.6) {\texttt{P1}};
+\node[box] (p1)  at (0,\ycmd) {\\#3};
+\node            at (1.5,\ycmd+0.6) {\texttt{P2}};
+\node[box] (p2)  at (1.5,\ycmd) {\\#4};
+\node            at (3,\ycmd+0.6) {\texttt{Lc}};
+\node[box] (lc)  at (3,\ycmd) {\\#5};
+\node            at (4.5,\ycmd+0.6) {\texttt{Le}};
+\node[box] (le)  at (4.5,\ycmd) {\\#6};
+% Command header arrows
+\draw[arrow] (-6,\ycmd) -- (cla);
+\draw[arrow] (le) -- (8,\ycmd);
+% Optional incoming payload
+\ifstrequal{#7}{none}{%
+}{
+  \node[bigbox] (in) at (0.75,\yin) {incoming payload of \texttt{Lc} bytes for #7};
+  \draw[arrow] (-6,\yin) -- (in);
+  \draw[arrow] (in) -- (8,\yin);
+}
+% Optional outgoing payload
+\ifstrequal{#8}{none}{%
+}{
+  \node[bigbox] (out) at (1,\yout) {outgoing payload of \texttt{Le} bytes for #8};
+  \draw[arrow] (8,\yout) -- (out);
+  \draw[arrow] (out) -- (-6,\yout);
+}
+% SW
+\node[box] (sw1) at (0,\ysw)       {\texttt{90}};
+\node            at (0,\ysw-0.6)   {\texttt{SW1}};
+\node[box] (sw2) at (1.5,\ysw)     {\texttt{00}};
+\node            at (1.5,\ysw-0.6) {\texttt{SW2}};
+\draw[arrow] (8,\ysw) -- (sw2);
+\draw[arrow] (sw1) -- (-6,\ysw);
+\end{tikzpicture}
+\end{figure}
+\end{center}
+\endgroup
+}
+
+\title{oXiDe SE: An Open Source Global Platform Environment Architecture}
+\author{}
+\date{\today}
+\hypersetup{
+  pdftitle={oXiDe SE: An Open Source Global Platform Environment Architecture},
+  pdfauthor={Gilles Grimaud}
+}
+
+\begin{document}
+
+%--------------------------------------------------
+\begin{titlepage}
+\centering
+
+\vspace*{2cm}
+
+{\Huge \textbf{oXiDe SE} \par}
+
+\vspace{0.5cm}
+
+{\Large An Open Source Global Platform Environment Architecture \par}
+
+\vspace{1.5cm}
+
+{\Large Gilles Grimaud$^{1,2,3}$ \par}
+
+\vspace{0.5cm}
+
+\small
+$^{1}$ Univ. Lille, UMR 9189 CRIStAL, F-59000 Lille, France\\
+$^{2}$ CNRS, UMR 9189, F-59000 Lille, France\\
+$^{3}$ Centrale Lille, F-59000 Lille, France
+
+\vspace{1cm}
+
+{\large Université de Lille}
+
+\vspace{1cm}
+
+{\large \today}
+
+\vfill
+
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% --------------------------------------------------
+% Principaux TODO suite a une relecture en profondeur au 05/04/26
+%
+% 1. Les sous-sections d'implementation reellement necessaires au developpement
+%    sont encore absentes. En pratique, LOAD, INSTALL, DELETE, le registre, les
+%    Security Domains, SCP03, les canaux logiques et la gestion fine des etats
+%    n'ont pas encore de description exploitable.
+%
+% 2. La frontiere de services privilegies entre le kernel et les applications
+%    administratives reste conceptuelle. L'idee est bien expliquee, mais pas le
+%    contrat. Il manque la forme concrete de l'API noyau : operations offertes,
+%    parametres, representation des privileges, regles de validation, modele
+%    d'erreur, propriete des buffers, et lien avec la session securisee.
+%
+% 3. Le modele d'isolation est clair comme objectif, mais pas encore comme
+%    mecanisme. Le document decrit correctement les frontieres
+%    kernel / admin apps / ordinary apps, mais ne dit pas comment elles sont
+%    imposees : separation memoire, handles, capabilities, mediation sur objets
+%    persistants, appels inter-applications, partage controle, ou strategie
+%    d'execution concrete. Pour un ingenieur, c'est encore un modele de
+%    securite, pas une architecture executable.
+%
+% 4. Le cycle de vie est encore trop narratif. Il manque des tables ou
+%    automates explicites par type d'objet : Executable Load File, application
+%    instance, Security Domain, avec etats permis, transitions legales,
+%    preconditions et causes de rejet.
+%
+% 5. La cartographie "qui traite quelle commande GP" n'est pas encore assez
+%    explicite pour implementer le dispatch. Le document dit bien que SELECT
+%    est preemptif et que le reste va a l'application selectionnee, mais il
+%    manque une matrice claire par commande : OPEN-level, commande SD, commande
+%    applicative, commande transport, contexte requis, privileges requis.
+%
+% 6. Les contraintes temporelles T=0 sont bien motivees, mais pas encore
+%    transformees en exigences d'implementation verifiables. Il manque des
+%    budgets concrets par cible, les hypotheses d'horloge/UART/interruptions,
+%    et surtout la methode de validation : comment on mesure, quelle marge on
+%    vise, et comment on evite une regression.
+%
+% 7. Le debut du document n'est pas totalement aligne avec la structure
+%    actuelle. L'Architecture Overview presente encore quatre "major
+%    components" comme des blocs homogenes, alors que le corps du manuel
+%    distingue maintenant beaucoup plus nettement : modele GP, lecture systeme,
+%    puis implementation. Ce n'est pas faux, mais c'est moins net que le reste.
+%
+% 8. Le chapitre d'implementation contient encore un marqueur non credible
+%     pour un lecteur externe. L'URL associee a la reference implementation
+%     pointe encore vers un depot fictif, ce qui cree une friction inutile pour
+%     un ingenieur qui veut suivre la documentation avec le code.
+%
+%--------------------------------------------------
+
+\include{Chapter_1}
+\include{Chapter_2}
+\include{Chapter_3}
+\include{Chapter_4}
+\include{Chapter_5}
+\include{Chapter_6}
+\include{Chapter_7}
+\include{Chapter_8}
+
+\appendix
+\include{Annex_1}
+\include{Annex_2}
+\include{Annex_3}
+
+\begingroup
+\raggedright
+\bibliographystyle{ieeetr}
+\bibliography{manual}
+\endgroup
+
+\end{document}

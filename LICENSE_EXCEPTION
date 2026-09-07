@@ -1,0 +1,57 @@
+GPOS syscall interface exception
+================================
+
+Project: GPOS
+Applies to: this repository only
+
+This file states an additional permission granted by the copyright
+holders of this repository for their respective contributions.
+
+Additional permission
+---------------------
+
+In addition to the rights granted by CeCILL v2.1, the copyright holders
+of this repository permit the creation, execution and distribution of
+software that communicates with this code base solely through the public
+system call interface exposed by the running platform, without causing
+that separate software to become subject to CeCILL v2.1 solely because
+of that communication.
+
+Conditions
+----------
+
+This exception applies only if all of the following are true:
+
+- the separate software does not modify this repository's code base;
+- the separate software does not incorporate or link code from this
+  repository, except by invoking the public system call interface of the
+  running platform;
+- the interaction with this repository is limited to the public system
+  calls exposed by the platform.
+
+Effect on modifications
+-----------------------
+
+Any modification of this repository itself remains governed by CeCILL
+v2.1. This exception does not change the licensing obligations that
+apply to changes made to the code base contained in this repository.
+
+Project intent
+--------------
+
+This exception is intended to clarify, in a manner similar in spirit to
+the syscall boundary used by operating system kernels such as Linux,
+that applications and other software may run on top of the platform and
+use its public system calls without having to be CeCILL-compatible for
+that reason alone.
+
+This repository is an open source implementation proposal around public
+GlobalPlatform specifications. It is provided without any claim of
+exhaustiveness, certification or industrial conformance.
+
+No broader waiver
+-----------------
+
+Except for the additional permission stated in this file, use,
+modification and redistribution of this repository remain governed by
+CeCILL v2.1.

@@ -1,0 +1,8 @@
+[submodule "tooling/build-fae"]
+	path = tooling/build-fae
+	url = https://github.com/2xs/build-fae.git
+	branch = main
+[submodule "tooling/qemu-rp2040-pico"]
+	path = tooling/qemu-rp2040-pico
+	url = https://github.com/2xs/qemu-rp2040-pico.git
+	branch = rp2040-pico-v3

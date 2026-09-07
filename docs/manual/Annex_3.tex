@@ -1,0 +1,319 @@
+\chapter{SCP Regression Vectors and Integration Campaigns}
+\label{app:scp03-vectors}
+
+This appendix documents the SCP regression evidence used by the Oxide SE test
+suite. It complements Chapter~3, Section~\ref{sec:protocol-scp}, Chapter~8,
+Section~\ref{sec:impl-scp}, and Appendix~\ref{app:scp-data-objects}. The
+validation campaign covers SCP03 S8, SCP03 S16, identity/no-SCP mode, and the
+SCP11a/SCP11b/SCP11c establishment and secure-messaging paths. In addition to
+the independently reproduced SCP03 files, it includes one byte-for-byte
+SCP11a reference scenario published by Samsung.
+
+\section{SCP03 Vector Files}
+
+The deterministic SCP03 vector files validate the S8 and S16 profiles.
+
+The files are:
+\begin{itemize}
+\item \texttt{xtask/tests/fixtures/scp03\_s8\_independently\_reproduced.txt};
+\item \texttt{xtask/tests/fixtures/scp03\_s16\_independently\_reproduced.txt}.
+\end{itemize}
+
+They are documented in the repository as:
+
+\begin{quote}
+Reference vectors independently reproduced from OpenSCDP and GlobalPlatformPro
+behavior, cross-checked against the public SCP03 specification.
+\end{quote}
+
+These are therefore \emph{not} official GlobalPlatform certification vectors.
+They are independent regression vectors used to make sure that the Oxide SE
+SCP03 implementation is not only self-consistent with its own host-side oracle.
+
+\section{Samsung SCP11a Reference Scenario}
+
+The first independent SCP11 fixture imported by Oxide SE is:
+
+\begin{verbatim}
+xtask/tests/fixtures/scp11a_p256_aes128_s16_samsung.txt
+\end{verbatim}
+
+It reproduces Samsung's SCP11a scenario using P-256, AES-128 and S16,
+published in the Apache-2.0-licensed OpenSCP-Java project
+\cite{samsung-openscp-java,samsung-openscp-blog}. The imported values come
+from repository commit
+\path{b9876fc36a5b18fb90ce03d0894f39edb08a905b}, specifically from:
+
+\begin{itemize}
+\item \path{Scp11TestData.java}, for the deterministic OCE static and
+      ephemeral keys;
+\item \path{Scp11Nist256TestData.java}, for the SD certificate material and
+      certificate-management APDUs;
+\item \path{SmartCardScp11aP256Aes128S16ModeEmulation.java}, for
+      \texttt{MUTUAL AUTHENTICATE} and the first protected
+      \texttt{GET STATUS} exchange.
+\end{itemize}
+
+The hexadecimal values are retained byte-for-byte. They are third-party
+regression evidence, not GlobalPlatform certification vectors. Samsung
+explicitly reports that public SCP11 vectors were not available and that its
+team calculated these scenarios for OpenSCP-Java.
+
+This scenario uses SCP identifier \texttt{11 01}: SCP11a without the optional
+Host/Card identity binding. Its \texttt{SharedInfo} is therefore exactly
+\texttt{3C 88 10}. The test validates:
+
+\begin{itemize}
+\item the normative top-level layout
+      \texttt{A6 \ldots{} 5F49 \ldots{}} of the authentication data;
+\item deterministic \texttt{ShSee} and \texttt{ShSss} ECDH results;
+\item X9.63/SHA-256 key derivation over \texttt{ShSee || ShSss};
+\item the Amendment-F assignment order: receipt key, \texttt{S-ENC},
+      \texttt{S-MAC}, \texttt{S-RMAC}, then \texttt{S-DEK};
+\item the receipt over the exact command \texttt{A6}/\texttt{5F49} objects
+      followed by the card \texttt{5F49} object;
+\item the first S16 protected \texttt{GET STATUS} C-APDU and R-APDU published
+      by Samsung, including R-MAC verification and response decryption.
+\end{itemize}
+
+The corresponding host-based regression command is:
+
+\begin{verbatim}
+cargo test -p xtask --test scp11_vectors --offline
+\end{verbatim}
+
+The protected Samsung C-APDU is reproduced by the fixture test to prove the
+derived keys and MAC chain. It is not injected unchanged into the QEMU
+campaign: oXiDe SE kernel integration continues to exercise the common
+Amendment~D framing selected for its SCP03/SCP11 APDU layer. The independent fixture
+and the QEMU campaigns consequently validate complementary boundaries.
+
+\section{Why Two Profiles Are Tested}
+
+Oxide SE currently validates two explicit SCP03 profiles in its kernel-native
+Security Domain path:
+\begin{itemize}
+\item \texttt{S8};
+\item \texttt{S16}.
+\end{itemize}
+
+The S8 profile uses:
+\begin{itemize}
+\item 8-byte host and card challenges;
+\item 8-byte authentication cryptograms;
+\item 8-byte truncated C-MAC and R-MAC values.
+\end{itemize}
+
+The S16 profile uses:
+\begin{itemize}
+\item 16-byte host and card challenges;
+\item 16-byte authentication cryptograms;
+\item 16-byte non-truncated C-MAC and R-MAC values.
+\end{itemize}
+
+Testing both profiles is important because S16 is not only a larger version of
+S8. It forces the APDU secure-channel layer to stop assuming that a protected
+command always ends with an 8-byte MAC. In oXiDe SE, the APDU layer asks the
+active Security Domain for the current MAC length before separating the raw
+command payload from its trailing C-MAC. The S16 tests are therefore also
+integration tests for that profile-dependent boundary.
+
+\section{Vector File Structure}
+
+Each vector file is a small line-oriented key/value document. Comments describe
+the profile and provenance. The remaining fields are hexadecimal byte strings.
+
+The common fields are:
+\begin{itemize}
+\item \texttt{profile}: either \texttt{S8} or \texttt{S16};
+\item \texttt{static\_enc\_key}: the AES-128 static ENC key used for session
+      derivation;
+\item \texttt{static\_mac\_key}: the AES-128 static MAC key used for session
+      derivation and cryptograms;
+\item \texttt{host\_challenge}: the host challenge sent in
+      \texttt{INITIALIZE UPDATE};
+\item \texttt{card\_challenge}: the deterministic development card challenge;
+\item \texttt{context}: the SCP03 derivation context, formed from host and
+      card challenges.
+\end{itemize}
+
+The authentication and session-derivation fields are:
+\begin{itemize}
+\item \texttt{card\_cryptogram};
+\item \texttt{host\_cryptogram};
+\item \texttt{session\_enc\_key};
+\item \texttt{session\_mac\_key};
+\item \texttt{session\_rmac\_key}.
+\end{itemize}
+
+The secure-messaging fields exercise command and response protection:
+\begin{itemize}
+\item \texttt{protected\_get\_data\_header};
+\item \texttt{protected\_get\_data\_cmac};
+\item \texttt{protected\_get\_data\_response};
+\item \texttt{protected\_get\_data\_rmac};
+\item \texttt{response\_enc\_iv\_1};
+\item \texttt{encrypted\_lifecycle\_response};
+\item \texttt{encrypted\_lifecycle\_rmac}.
+\end{itemize}
+
+The command-encryption fields exercise \texttt{C-ENC}:
+\begin{itemize}
+\item \texttt{store\_plaintext};
+\item \texttt{store\_enc\_iv\_1};
+\item \texttt{store\_encrypted\_data};
+\item \texttt{store\_cmac}.
+\end{itemize}
+
+Finally, the protected installation fields exercise a GlobalPlatform
+\texttt{INSTALL [for install]} payload:
+\begin{itemize}
+\item \texttt{install\_plain\_data};
+\item \texttt{install\_enc\_iv\_2};
+\item \texttt{install\_encrypted\_data};
+\item \texttt{install\_cmac}.
+\end{itemize}
+
+\section{How The Tests Use The Vectors}
+
+The pure SCP03 vector test is:
+
+\begin{verbatim}
+cargo test -p xtask --test scp03_vectors --offline
+\end{verbatim}
+
+This test parses both files and recomputes the expected values with the
+host-side crypto implementation used by the test oracle. It checks:
+\begin{itemize}
+\item KDF output for card and host cryptograms;
+\item session ENC, MAC and RMAC keys;
+\item protected \texttt{GET DATA} C-MAC;
+\item protected response R-MAC;
+\item response encryption and its R-MAC;
+\item encrypted \texttt{STORE DATA} payload and C-MAC;
+\item encrypted \texttt{INSTALL [for install]} payload and C-MAC.
+\end{itemize}
+
+The dedicated SCP03 QEMU integration test is:
+
+\begin{verbatim}
+cargo run test gp_scp03 --elf s8 mps2-an385
+\end{verbatim}
+
+It boots the kernel-native SCP03 profiles:
+\begin{itemize}
+\item one with \texttt{KernelSecurityDomain} plus
+      \texttt{OXIDE\_SE\_SCP03\_PROFILE=S8};
+\item one with \texttt{KernelSecurityDomain} plus
+      \texttt{OXIDE\_SE\_SCP03\_PROFILE=S16}.
+\end{itemize}
+
+For the two kernel SCP03 profiles, the test performs the current management
+regression flow:
+\begin{enumerate}
+\item clear \texttt{GET DATA};
+\item \texttt{INITIALIZE UPDATE};
+\item bad \texttt{EXTERNAL AUTHENTICATE} rejection;
+\item successful \texttt{EXTERNAL AUTHENTICATE};
+\item bad C-MAC rejection;
+\item protected \texttt{GET DATA} with R-MAC;
+\item clear \texttt{INSTALL [for install]} rejection;
+\item encrypted secure-channel establishment;
+\item protected \texttt{GET DATA} with R-ENC and R-MAC;
+\item encrypted \texttt{STORE DATA};
+\item encrypted \texttt{PUT KEY} and rotated-keyset authentication;
+\item encrypted \texttt{INSTALL [for install]};
+\item secondary kernel Security Domain instantiation and non-escalation checks;
+\item selection and execution of \texttt{minimal\_valid\_test}.
+\end{enumerate}
+
+The identity/no-SCP path is validated separately through:
+
+\begin{verbatim}
+cargo run test gp_noscp --elf mps2-an385
+\end{verbatim}
+
+Oxide SE also maintains a dedicated Rustlet-backed Security Domain campaign.
+That complementary path validates the same SCP03 concepts through a selected
+Security Domain instance reached via \texttt{RustletSecurityDomainProxy}. This
+matters because it demonstrates that the same secure-channel framework can be
+driven either by a kernel-native backend or by a user-land Rustlet authority.
+That campaign also validates that SCP03 keysets stored through
+\texttt{PUT KEY} are scoped per Security Domain instance: a rotated keyset
+installed for one Rustlet-backed Security Domain instance is not visible from a
+second instance until that second instance receives its own \texttt{PUT KEY}.
+
+The SCP11 establishment and secure-messaging smoke paths are validated through:
+
+\begin{verbatim}
+cargo run test gp_scp11a --elf mps2-an385
+cargo run test gp_scp11b --elf mps2-an385
+cargo run test gp_scp11c --elf mps2-an385
+\end{verbatim}
+
+Those tests exercise \texttt{PERFORM SECURITY OPERATION} where the profile
+requires it. They also validate \texttt{MUTUAL AUTHENTICATE} and
+\texttt{INTERNAL AUTHENTICATE}, the TLV-coded \texttt{A6} request, the
+\texttt{5F49}/\texttt{86} response, receipt verification, and protected
+payload-and-MAC secure messaging through the generic secure-channel layer. They prove
+the internally selected development profiles and their dispatch paths; they do
+not by themselves prove that every establishment parameter and cryptographic
+role matches the complete GlobalPlatform profile.
+
+The vector files and the QEMU tests serve different purposes. The vector files
+validate deterministic SCP03 transformations and the independently published
+Samsung SCP11a establishment scenario. The QEMU tests
+validate that SCP establishment and secure messaging are correctly connected to
+APDU parsing, Security-Domain policy, registry mutation, and Rustlet execution.
+
+\section{Provenance and Limits}
+
+OpenSCDP and GlobalPlatformPro are used as independent behavioral references
+for reproducing the vectors. They are valuable because they exercise the same
+GlobalPlatform/SCP03 concepts outside the Oxide SE implementation. The vectors
+were also cross-checked against the public SCP03 specification.
+
+For SCP11a, Samsung OpenSCP-Java is the independent implementation and source
+of the fixed S16 scenario. Its repository provides the certificates, static
+and ephemeral keys, C-APDUs and R-APDUs needed to reproduce that scenario
+without executing Oxide SE's own host oracle. No equivalent Samsung SCP11b
+fixture is present in the referenced test suite.
+
+This still leaves an explicit certification gap:
+\begin{itemize}
+\item the files are not official GlobalPlatform certification vectors;
+\item development bootstrap material still exists for the current kernel
+      profiles and must be replaced by a production provisioning policy;
+\item SCP03 key objects, \texttt{PUT KEY}, key identifiers and rotated-keyset
+      authentication are implemented as regression paths, but diversification,
+      production lifecycle governance and official certification vectors still
+      remain open work;
+\item SCP11a now has an independent establishment vector for P-256, AES-128
+      and S16. SCP11b and SCP11c still rely on development-profile campaigns
+      for their current cryptographic regression evidence;
+\item SCP11a, SCP11b and SCP11c currently have development-profile
+      establishment and protected-messaging campaigns using the same
+      Amendment~D payload-and-MAC framing as SCP03; those
+      campaigns enforce the SCP parameter/tag-\texttt{84} relation, bind
+      Security-Domain-owned SIN/SDIN or Card Group ID values, resolve the
+      requested ECKA key selector, and exercise multi-command PSO certificate
+      transfer;
+\item the current development profile accepts a single OCE certificate of at
+      most 256 bytes after PSO command-block reassembly.  Intermediate
+      certificate chains selected by \texttt{P2.b8} are explicitly profiled
+      out with status \texttt{6A86}.
+\end{itemize}
+
+The kernel and Rustlet-backed campaigns also exercise exact status words for
+malformed CRT and protected-payload encodings, unknown key selectors, certificate failure,
+failed host authentication, invalid MAC chains, stale receipts, replay,
+profile-dependent lengths, and commands issued outside their required session
+state. These negative tests verify that rejected transformations do not advance
+MAC chains or encryption counters and that cryptographic secure-messaging
+failures require a fresh establishment sequence.
+
+The goal of the current Appendix is therefore precise: document the regression
+evidence used by Oxide SE today, explain how SCP03 S8 and S16 differ in
+practice, record the SCP11a/SCP11b/SCP11c validation paths, and make clear which part of
+the validation is independently reproduced and which part remains future
+certification work.

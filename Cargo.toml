@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "kernel/core",
+    "kernel/firmware",
+    "core_test",
+    "rustlets/rustlet_runtime",
+    "xtask",
+    "tools/apdu-tool",
+]
+default-members = [
+    "xtask",
+]
+resolver = "2"
+
+[workspace.metadata.oxide_se]
+default_config_toml = "config.toml"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

@@ -1,0 +1,266 @@
+\chapter{APDU over T=0}
+\label{app:apdu-over-t0}
+
+This appendix summarizes how the present implementation maps the
+conceptual APDU model of Chapter~4 onto the concrete \texttt{T=0}
+transport and onto the programming interface exposed by Oxide SE.
+
+From an implementation point of view, this mapping lives in a small
+stack of kernel objects:
+\begin{itemize}
+\item \texttt{TransportLayer} owns byte I/O;
+\item \texttt{T0ApduManager<T>} owns the \texttt{T=0} state machine;
+\item \texttt{ApduLayer} owns protocol-layer composition above
+  \texttt{T=0};
+\item \texttt{SEApdu} remains the card-side command-processing
+  interface.
+\end{itemize}
+
+This means that the appendix should be read at two levels at once:
+\begin{itemize}
+\item as a description of the external \texttt{T=0} byte stream;
+\item as a description of how that byte stream is reified into layered
+  kernel objects before command logic runs.
+\end{itemize}
+
+\section{From Conceptual APDUs to the Oxide SE Interface}
+
+At the conceptual level, an APDU is a command/response pair made of:
+\begin{itemize}
+\item one command header (\texttt{CLA}, \texttt{INS}, \texttt{P1},
+  \texttt{P2});
+\item optional incoming command data, logically measured by
+  \texttt{Lc};
+\item optional outgoing response data, logically measured by
+  \texttt{Le};
+\item one final status word \texttt{SW1/SW2}.
+\end{itemize}
+
+At the implementation level, Oxide SE does not expose that conceptual
+model as a ready-made ``full APDU'' object that already contains both
+incoming and outgoing data. Instead, it exposes the APDU in the form in
+which a secure element can actually process it under \texttt{T=0}:
+\begin{itemize}
+\item first, the five command bytes are known;
+\item then the command logic decides whether command data must be
+  received;
+\item then the command logic decides whether response data will be
+  produced, and how many bytes are logically available.
+\end{itemize}
+
+This is why the common APDU-facing interface is organized around the
+following operations:
+\begin{itemize}
+\item \texttt{set\_incoming\_and\_Receive()};
+\item \texttt{set\_outgoing()};
+\item \texttt{set\_outgoing\_length(len)};
+\item \texttt{send\_bytes(offset, len)};
+\item \texttt{send\_bytes\_long(src, offset, len)}.
+\end{itemize}
+
+These operations are not transport bypasses. They are declarations and
+state transitions on the card-side APDU session:
+\begin{itemize}
+\item \texttt{set\_incoming\_and\_Receive()} means ``this command consumes
+  incoming data now'';
+\item \texttt{set\_outgoing()} means ``this command is logically an
+  outgoing command'';
+\item \texttt{set\_outgoing\_length(len)} means ``the command has prepared
+  \texttt{len} outgoing bytes'';
+\item \texttt{send\_bytes()} and \texttt{send\_bytes\_long()} only stage
+  payload bytes in the APDU buffer and set the outgoing length
+  accordingly.
+\end{itemize}
+
+The final transport behavior is still chosen by the kernel-owned
+\texttt{T=0} loop after the command handler returns.
+
+\section{From the Interface to the \texttt{T=0} Exchange}
+
+The implementation distinguishes the four classical short APDU cases:
+\begin{itemize}
+\item \textbf{Case 1:} no incoming data, no outgoing data;
+\item \textbf{Case 2:} no incoming data, outgoing data only;
+\item \textbf{Case 3:} incoming data only;
+\item \textbf{Case 4:} incoming data followed by a deferred outgoing
+  response.
+\end{itemize}
+
+The present interface maps those cases as follows:
+
+\begin{center}
+\begin{tabular}{|p{2.1cm}|p{6.0cm}|p{6.0cm}|}
+\hline
+\textbf{Case} & \textbf{Oxide SE operations} & \textbf{Transport result} \\
+\hline
+Case 1 & no APDU transition call & final \texttt{SW1/SW2} \\
+\hline
+Case 2 & \texttt{set\_outgoing()}\newline
+         \texttt{set\_outgoing\_length()} &
+         procedure byte, data, final status \\
+\hline
+Case 3 & \texttt{set\_incoming\_and\_Receive()} &
+         procedure byte, incoming bytes, final status \\
+\hline
+Case 4 & \texttt{set\_incoming\_and\_Receive()}\newline
+         \texttt{set\_outgoing()}\newline
+         \texttt{set\_outgoing\_length()} &
+         incoming phase, then \texttt{61xx}, then \texttt{GET RESPONSE} \\
+\hline
+\end{tabular}
+\end{center}
+
+This is the main implementation rule of the current system: APDU command
+logic expresses \emph{what kind of APDU interaction is required}, while
+the transport loop remains responsible for deciding \emph{which bytes
+must actually be emitted next on the wire}.
+
+In implementation terms:
+\begin{itemize}
+\item \texttt{SEApdu} expresses the card-side command intent;
+\item \texttt{ApduLayer} transports command and completion objects
+  between protocol layers;
+\item \texttt{T0ApduManager} translates those decisions into concrete
+  \texttt{T=0} bytes.
+\end{itemize}
+
+\section{The Current \texttt{T=0} State Machine}
+
+The current implementation can be summarized by the following state
+machine:
+
+\begin{enumerate}
+\item emit ATR after reset;
+\item read the 5-byte command header;
+\item emit one \texttt{0x60} NULL procedure byte to restart the work
+  waiting time without yet committing to an incoming or outgoing data
+  phase, as allowed by the \texttt{T=0} procedure-byte rules of
+  ISO/IEC~7816-3 (\emph{Protocol type T=0, structure and processing of
+  commands}, clause \texttt{3.5.b}) \cite{iso7816-3};
+\item build the transport-owned APDU object;
+\item dispatch the command logic;
+\item depending on the declared APDU direction:
+  \begin{itemize}
+  \item return only the final status;
+  \item emit a procedure byte, then direct outgoing bytes, then final
+    status;
+  \item emit \texttt{61xx} and store the pending response;
+  \item emit \texttt{6Cxx} and wait for command replay with the correct
+    \texttt{Le}.
+  \end{itemize}
+\item if a valid \texttt{GET RESPONSE} command is later received, emit
+  the \texttt{C0} procedure byte, the next response chunk, and either a
+  final status or another \texttt{61xx}.
+\end{enumerate}
+
+The critical point is that the command handler does not itself drive the
+wire. It only mutates APDU state. The kernel transport loop interprets
+that state and performs the corresponding \texttt{T=0} exchange.
+
+The current reference kernel instantiates this state machine through the
+following object composition:
+\begin{center}
+\texttt{CurrentTransport $\rightarrow$ T0ApduManager $\rightarrow$ PassthroughApduLayer $\rightarrow$ SecureChannelLayer $\rightarrow$ TracingApduLayer}
+\end{center}
+
+The dispatcher then consumes the resulting \texttt{ApduCommand},
+derives an \texttt{SEApdu} view from it, and finally reports an
+\texttt{ApduCompletion} back into the same stack.
+
+\section{Procedure Bytes}
+
+Procedure bytes are the bridge between the conceptual APDU model and the
+half-duplex \texttt{T=0} byte stream.
+
+In the present implementation:
+\begin{itemize}
+\item immediately after the 5-byte header, the secure element emits the
+  NULL procedure byte \texttt{0x60} once, in order to restart the work
+  waiting time while command routing begins; this is the dedicated
+  ``wait'' procedure byte defined by ISO/IEC~7816-3
+  clause~\texttt{3.5.b} and it requests no data transfer by itself
+  \cite{iso7816-3};
+\item for incoming data reception, the secure element emits the current
+  command \texttt{INS} as a procedure byte before receiving the
+  \texttt{Lc} bytes;
+\item for direct outgoing transmission, the secure element emits the
+  current command \texttt{INS} as a procedure byte before sending the
+  response bytes;
+\item for \texttt{GET RESPONSE}, the secure element emits
+  \texttt{C0}---the \texttt{INS} byte of \texttt{GET RESPONSE}---before
+  sending the deferred response bytes.
+\end{itemize}
+
+This means that the APDU programming interface intentionally does not
+contain an explicit ``send procedure byte'' operation. Procedure bytes
+are not an application-level concept in Oxide SE. They are an effect of
+the kernel transport state machine. In particular, Oxide SE distinguishes:
+\begin{itemize}
+\item \texttt{0x60} as a NULL procedure byte used only to extend the
+  waiting time;
+\item \texttt{INS} or \texttt{C0} as whole-transfer ACK procedure bytes used only when
+  the transport actually enters an incoming, direct outgoing, or
+  \texttt{GET RESPONSE} phase.
+\end{itemize}
+
+The protocol also defines the one's complement of \texttt{INS} as a
+single-byte-transfer ACK. The reference kernel currently emits only the
+whole-transfer ACK, but host parsers distinguish the complemented ACK
+from both status bytes and transport errors. Conversely, receipt of a
+valid \texttt{SW1} immediately after the header terminates the command
+before any incoming or outgoing data phase. The legal byte classes and
+the resulting \texttt{INS} restriction are specified in
+Section~\ref{sec:apdu-t0-procedure-bytes}.
+
+\section{Wrong Length and Deferred Response}
+
+Two transport-owned completion mechanisms are particularly important.
+
+\subsection{\texttt{6Cxx} for Pure Outgoing Commands}
+
+For a pure outgoing command, the fifth command byte is interpreted as
+\texttt{Le}. The command logic may declare an actual response length
+through \texttt{set\_outgoing\_length(len)}. If the requested
+\texttt{Le} does not match the actual available length, the current
+implementation may return \texttt{6Cxx}, where \texttt{xx} is the
+correct length to request.
+
+The host must then resend the same command with the corrected
+\texttt{Le}. This path is therefore transport-owned: the command logic
+does not manually emit \texttt{6Cxx}.
+
+\subsection{\texttt{61xx} and \texttt{GET RESPONSE} for In/Out Commands}
+
+For a command that first consumes incoming data and then prepares
+outgoing data, the current implementation follows the classical
+\texttt{T=0} pattern:
+\begin{itemize}
+\item the command consumes incoming data through
+  \texttt{set\_incoming\_and\_Receive()};
+\item the command prepares outgoing data through
+  \texttt{set\_outgoing()} and \texttt{set\_outgoing\_length(len)};
+\item the kernel does not emit those outgoing bytes immediately;
+\item instead, it stores them in the deferred-response buffer and
+  returns \texttt{61xx};
+\item the interface device must then send \texttt{GET RESPONSE};
+\item the kernel emits the \texttt{C0} procedure byte, then the stored
+  response bytes, then the final \texttt{SW1/SW2}.
+\end{itemize}
+
+This is the current realization of a logical Case~4 APDU in Oxide SE.
+
+\section{Synthesis}
+
+The implementation can therefore be summarized in one sentence:
+Oxide SE exposes APDUs to command logic as a Java-Card-like card-side
+interface, while the kernel remains the sole owner of the concrete
+\texttt{T=0} byte stream, including procedure bytes, \texttt{6Cxx},
+\texttt{61xx}, and \texttt{GET RESPONSE}.
+
+This separation allows the same command-processing model to be used:
+\begin{itemize}
+\item by kernel-side code through the kernel \texttt{Apdu} view;
+\item by Rustlets through \texttt{RustletCtx};
+\item by the kernel-to-Rustlet bridge through the common
+  \texttt{SEApdu} trait.
+\end{itemize}

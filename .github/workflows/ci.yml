@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release snapshot
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt, rust-src
+
+      - name: Install embedded and QEMU dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils-arm-none-eabi gcc-arm-none-eabi libudev-dev pkg-config qemu-system-arm
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy -p xtask --all-targets
+
+      - name: Test the host-side workspace
+        run: cargo test --offline
+
+      - name: Build the default kernel image
+        run: cargo run build
+
+  manual:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release snapshot
+        uses: actions/checkout@v6
+
+      - name: Install LaTeX dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes latexmk lmodern texlive-fonts-recommended texlive-latex-extra texlive-pictures
+
+      - name: Build the architecture manual
+        run: make -C docs pdf

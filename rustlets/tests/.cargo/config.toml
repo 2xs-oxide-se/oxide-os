@@ -1,0 +1,2 @@
+[alias]
+build-fae = "run -p rustlet_tests_xtask -- build-fae"

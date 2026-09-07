@@ -1,0 +1,9 @@
+[package]
+name = "rustlet_isolation_fault_test"
+version = "0.1.0"
+edition = "2021"
+license = "CECILL-2.1"
+publish = false
+
+[dependencies]
+rustlet_runtime = { path = "../../rustlet_runtime", features = ["runtime"] }
